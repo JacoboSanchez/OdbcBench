@@ -1,0 +1,64 @@
+{
+  "query": "SELECT id, customer, amount, created_at FROM sales.orders ORDER BY id",
+  "queryFile": null,
+  "baseline": "sqlserver-legacy",
+  "dsns": [
+    {
+      "name": "sqlserver-legacy",
+      "connectionString": "Driver={SQL Server};Server=db01;Database=sales",
+      "uid": "bench",
+      "pwdEnv": "BENCH_SQLSERVER_PWD"
+    },
+    {
+      "name": "dremio-flight",
+      "dsn": "Arrow Flight SQL ODBC DSN",
+      "uid": "bench",
+      "extraAttributes": "useEncryption=true",
+      "query": "SELECT id, customer, amount, created_at FROM \"sales\".\"orders\" ORDER BY id"
+    },
+    {
+      "name": "disabled-example",
+      "dsn": "SomeOtherDsn",
+      "uid": "bench",
+      "pwd": "change-me",
+      "enabled": false
+    }
+  ],
+  "odbcVersion": "3.80",
+  "warmupIterations": 3,
+  "iterations": 20,
+  "connectSamples": 5,
+  "blockSizes": [ 1000 ],
+  "bindMode": "native",
+  "reuseStatement": true,
+  "connectionPerIteration": false,
+  "interleave": true,
+  "pauseBetweenIterationsMs": 0,
+  "cacheBuster": false,
+  "calibrate": true,
+  "processPriority": "normal",
+  "queryTimeoutSeconds": 0,
+  "loginTimeoutSeconds": 30,
+  "maxConsecutiveErrors": 3,
+  "longColumnMode": "rowByRow",
+  "longColumnThresholdBytes": 8000,
+  "longColumnCapBytes": 65536,
+  "maxBoundBytes": 268435456,
+  "getDataChunkBytes": 32768,
+  "validation": {
+    "enabled": true,
+    "rows": 10,
+    "strict": false,
+    "normalization": {
+      "trimTrailingSpaces": true,
+      "nullEqualsEmpty": false,
+      "floatTolerance": 1e-9
+    }
+  },
+  "output": {
+    "directory": "results",
+    "prefix": "run",
+    "markdown": true,
+    "json": true
+  }
+}

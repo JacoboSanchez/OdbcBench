@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- 64-bit only: loads the 64-bit ODBC Driver Manager and therefore only 64-bit drivers and DSNs. -->
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredCompilation>false</TieredCompilation>
+    <AssemblyName>OdbcBench</AssemblyName>
+    <RootNamespace>OdbcBench</RootNamespace>
+    <Version>0.1.0</Version>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="OdbcBench.Tests" />
+  </ItemGroup>
+
+</Project>
