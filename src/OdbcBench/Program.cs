@@ -48,6 +48,12 @@ internal static class Program
             return 0;
         }
 
+        if (!Environment.Is64BitProcess && cli.Command != "report")
+        {
+            Console.Error.WriteLine("error: OdbcBench must run as a 64-bit process (it declares SQLLEN as 8 bytes).");
+            return 3;
+        }
+
         try
         {
             return cli.Command switch
@@ -191,8 +197,8 @@ internal static class Program
             o.WriteLine($"{d.Name}  ({d.Source})");
             if (!string.IsNullOrWhiteSpace(d.Dsn))
             {
-                var locations = OdbcRegistry.FindDsn(d.Dsn);
-                o.WriteLine($"  registry     : {(locations.Count == 0 ? "not found in the ODBC administrator (system or user DSNs)" : string.Join("; ", locations))}");
+                var locations = OdbcDataSources.FindDsn(d.Dsn);
+                o.WriteLine($"  defined in   : {(locations.Count == 0 ? "not found in the ODBC configuration (system or user DSNs)" : string.Join("; ", locations))}");
             }
 
             OdbcConnection connection;
@@ -204,7 +210,7 @@ internal static class Program
             catch (OdbcException ex)
             {
                 o.WriteLine($"  connect      : FAILED {ex.Message}");
-                var hint = OdbcRegistry.Hint(d.Dsn, ex.SqlState);
+                var hint = OdbcDataSources.Hint(d.Dsn, ex.SqlState);
                 if (hint != null) o.WriteLine($"  hint         : {hint}");
                 failures++;
                 continue;

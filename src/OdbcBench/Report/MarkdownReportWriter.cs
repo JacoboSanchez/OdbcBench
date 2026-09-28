@@ -429,8 +429,8 @@ public static class MarkdownReportWriter
                 s.IsBaseline ? "baseline" : s.RatioToBaseline == null ? "–" : $"{Ratio(s.RatioToBaseline)} ({Signed(s.PercentVsBaseline!.Value)})",
             }), "lllrrrrrrrrr");
 
-        if (insert) InsertBreakdown(md, group);
-        else FetchBreakdown(md, group);
+        if (insert) InsertBreakdown(md, run, group);
+        else FetchBreakdown(md, run, group);
 
         var notes = group.SelectMany(s => s.Warnings.Select(w => (s.DsnName, w))).ToList();
         if (notes.Count > 0)
@@ -442,7 +442,7 @@ public static class MarkdownReportWriter
         }
     }
 
-    private static void InsertBreakdown(Md md, List<SeriesResult> group)
+    private static void InsertBreakdown(Md md, RunResult run, List<SeriesResult> group)
     {
         bool prepare = group.Any(s => s.Describe != null);
         bool connect = group.Any(s => s.Connect != null);
@@ -481,11 +481,11 @@ public static class MarkdownReportWriter
                     s.EffectiveBlockSize.ToString("N0", Inv),
                 }), "lrrrrrrrrr");
         md.Paragraph("Data MB counts the bytes of every value as sent in its C type (10^6 bytes), not network bytes. " +
-                     "Rows/s and MB/s divide by the total time. CPU is process user + kernel time, generating the values included, over the total time; above 100% means the driver used several threads. " +
-                     "Windows accounts CPU time in ticks of about 15.6 ms, so CPU figures are coarse for short iterations.");
+                     "Rows/s and MB/s divide by the total time. CPU is process user + kernel time, generating the values included, over the total time; above 100% means the driver used several threads." +
+                     CpuGranularityNote(run));
     }
 
-    private static void FetchBreakdown(Md md, List<SeriesResult> group)
+    private static void FetchBreakdown(Md md, RunResult run, List<SeriesResult> group)
     {
         bool describe = group.Any(s => s.Describe != null);
         bool connect = group.Any(s => s.Connect != null);
@@ -521,8 +521,15 @@ public static class MarkdownReportWriter
                     s.EffectiveBlockSize.ToString("N0", Inv),
                 }), "lrrrrrrrrr");
         md.Paragraph("Data MB counts the bytes of every non-NULL value as delivered in its C type (10^6 bytes), not network bytes. " +
-                     "Rows/s and MB/s divide by the total time. CPU is process user + kernel time over wall time; above 100% means the driver used several threads. Windows accounts CPU time in ticks of about 15.6 ms, so CPU figures are coarse for short iterations.");
+                     "Rows/s and MB/s divide by the total time. CPU is process user + kernel time over wall time; above 100% means the driver used several threads." +
+                     CpuGranularityNote(run));
     }
+
+    /// <summary>Windows accounts process CPU time in scheduler ticks; Linux and macOS report it at much finer resolution.</summary>
+    private static string CpuGranularityNote(RunResult run) =>
+        run.Environment.Os is { Length: > 0 } os && !os.Contains("Windows", StringComparison.OrdinalIgnoreCase)
+            ? ""
+            : " Windows accounts CPU time in ticks of about 15.6 ms, so CPU figures are coarse for short iterations.";
 
     private static void InsertConsistency(Md md, RunResult run, List<SeriesResult> withData)
     {

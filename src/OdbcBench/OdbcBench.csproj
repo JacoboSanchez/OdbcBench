@@ -3,9 +3,9 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
-    <!-- 64-bit only: loads the 64-bit ODBC Driver Manager and therefore only 64-bit drivers and DSNs. -->
-    <PlatformTarget>x64</PlatformTarget>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Portable: runs on Windows (odbc32.dll) and on Linux/macOS (unixODBC). Pick a runtime at publish time with -r.
+         64-bit only (checked at startup): SQLLEN/SQLULEN are declared as 8 bytes, and a 64-bit process loads
+         the 64-bit Driver Manager and therefore only 64-bit drivers and DSNs. -->
     <SelfContained>false</SelfContained>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

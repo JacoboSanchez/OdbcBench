@@ -125,7 +125,8 @@ internal sealed class CliOptions
     }
 
     public const string Usage = """
-        OdbcBench - compare ODBC drivers on the same query or batch insert through the raw ODBC API (odbc32.dll).
+        OdbcBench - compare ODBC drivers on the same query or batch insert through the raw ODBC API
+        (odbc32.dll on Windows, unixODBC on Linux and macOS).
 
         Usage:
           OdbcBench run    --config FILE [options]   validate the first rows on every DSN, benchmark the query, write the report
