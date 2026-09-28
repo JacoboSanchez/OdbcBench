@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
+using OdbcBench.Odbc;
 using OdbcBench.Report;
 
 namespace OdbcBench.Bench;
@@ -14,8 +16,11 @@ internal static class ToolInfo
         ?? "0.0.0";
 }
 
-/// <summary>Process CPU time (user + kernel) from GetProcessTimes: allocation-free, fresh on every call.</summary>
-internal static partial class ProcessCpu
+/// <summary>
+/// Process CPU time (user + kernel), allocation-free and fresh on every call: GetProcessTimes on Windows,
+/// clock_gettime(CLOCK_PROCESS_CPUTIME_ID) on Linux and macOS.
+/// </summary>
+internal static unsafe partial class ProcessCpu
 {
     [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -24,15 +29,31 @@ internal static partial class ProcessCpu
     [LibraryImport("kernel32.dll")]
     private static partial nint GetCurrentProcess();
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TimeSpec
+    {
+        public long Seconds;     // time_t, 8 bytes on 64-bit Linux and macOS
+        public long Nanoseconds; // long
+    }
+
+    [LibraryImport(DriverManager.LibcName, EntryPoint = "clock_gettime")]
+    private static partial int ClockGetTime(int clockId, TimeSpec* time);
+
+    private static readonly int ProcessClock = OperatingSystem.IsMacOS() ? 12 : 2; // CLOCK_PROCESS_CPUTIME_ID
+
     public static double NowMs()
     {
-        return GetProcessTimes(GetCurrentProcess(), out _, out _, out long kernel, out long user)
-            ? (kernel + user) / 10_000.0 // 100 ns units
-            : 0;
+        if (OperatingSystem.IsWindows())
+            return GetProcessTimes(GetCurrentProcess(), out _, out _, out long kernel, out long user)
+                ? (kernel + user) / 10_000.0 // 100 ns units
+                : 0;
+
+        TimeSpec time;
+        return ClockGetTime(ProcessClock, &time) == 0 ? time.Seconds * 1000.0 + time.Nanoseconds / 1_000_000.0 : 0;
     }
 }
 
-/// <summary>Installed physical memory as reported by Windows (GlobalMemoryStatusEx).</summary>
+/// <summary>Installed physical memory: GlobalMemoryStatusEx on Windows, /proc/meminfo on Linux, the GC's view otherwise.</summary>
 internal static partial class PhysicalMemory
 {
     [StructLayout(LayoutKind.Sequential)]
@@ -55,8 +76,18 @@ internal static partial class PhysicalMemory
 
     public static double TotalBytes()
     {
-        var status = new MemoryStatusEx { Length = (uint)Marshal.SizeOf<MemoryStatusEx>() };
-        return GlobalMemoryStatusEx(ref status) ? status.TotalPhys : GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        if (OperatingSystem.IsWindows())
+        {
+            var status = new MemoryStatusEx { Length = (uint)Marshal.SizeOf<MemoryStatusEx>() };
+            if (GlobalMemoryStatusEx(ref status)) return status.TotalPhys;
+        }
+        else if (OperatingSystem.IsLinux() && SystemInfo.ReadProcField("/proc/meminfo", "MemTotal") is { } total)
+        {
+            // "16318044 kB"
+            var number = total.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+            if (double.TryParse(number, NumberStyles.Float, CultureInfo.InvariantCulture, out double kb)) return kb * 1024;
+        }
+        return GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
     }
 }
 
@@ -76,8 +107,13 @@ internal static class SystemInfo
         HighResolutionTimer = Stopwatch.IsHighResolution,
     };
 
+    /// <summary>
+    /// odbc32.dll's file version on Windows. On Linux and macOS, the unixODBC library that was loaded (the version itself
+    /// comes from SQLGetInfo(SQL_DM_VER) once a connection is open).
+    /// </summary>
     public static string DriverManagerFileVersion()
     {
+        if (!OperatingSystem.IsWindows()) return DriverManager.LoadedName is { } name ? $"unixODBC ({name})" : "unixODBC";
         try
         {
             var info = FileVersionInfo.GetVersionInfo(Path.Combine(Environment.SystemDirectory, "odbc32.dll"));
@@ -91,6 +127,8 @@ internal static class SystemInfo
 
     private static string CpuName()
     {
+        if (OperatingSystem.IsLinux())
+            return ReadProcField("/proc/cpuinfo", "model name") ?? ReadProcField("/proc/cpuinfo", "Model") ?? "";
         if (!OperatingSystem.IsWindows()) return "";
         try
         {
@@ -103,6 +141,24 @@ internal static class SystemInfo
         }
     }
 
+    /// <summary>Value of the first "key : value" line of a /proc file, or null.</summary>
+    internal static string? ReadProcField(string path, string key)
+    {
+        try
+        {
+            foreach (var line in File.ReadLines(path))
+            {
+                int colon = line.IndexOf(':');
+                if (colon > 0 && line.AsSpan(0, colon).Trim().SequenceEqual(key)) return line[(colon + 1)..].Trim();
+            }
+        }
+        catch
+        {
+            // not readable: nothing to report
+        }
+        return null;
+    }
+
     private static readonly Dictionary<string, string> KnownPlans = new(StringComparer.OrdinalIgnoreCase)
     {
         ["381b4222-f694-41f0-9685-ff5bb260df2e"] = "Balanced",
@@ -113,6 +169,7 @@ internal static class SystemInfo
 
     private static string PowerPlan()
     {
+        if (OperatingSystem.IsLinux()) return LinuxPowerSettings();
         if (!OperatingSystem.IsWindows()) return "";
         try
         {
@@ -130,6 +187,31 @@ internal static class SystemInfo
         catch
         {
             return "unknown";
+        }
+    }
+
+    /// <summary>The Linux counterparts of a power plan: the cpufreq governor and, where the firmware has one, the platform profile.</summary>
+    private static string LinuxPowerSettings()
+    {
+        var parts = new List<string>(2);
+        var governor = ReadFirstLine("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
+        if (governor != null) parts.Add($"cpufreq governor {governor}");
+        var profile = ReadFirstLine("/sys/firmware/acpi/platform_profile");
+        if (profile != null) parts.Add($"platform profile {profile}");
+        return parts.Count == 0 ? "unknown" : string.Join(", ", parts);
+    }
+
+    private static string? ReadFirstLine(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var text = File.ReadLines(path).FirstOrDefault()?.Trim();
+            return string.IsNullOrEmpty(text) ? null : text;
+        }
+        catch
+        {
+            return null;
         }
     }
 }

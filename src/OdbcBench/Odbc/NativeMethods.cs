@@ -5,14 +5,17 @@ using System.Runtime.InteropServices;
 namespace OdbcBench.Odbc;
 
 /// <summary>
-/// Raw ODBC 3.x entry points of the Windows Driver Manager (odbc32.dll), Unicode (W) variants only.
+/// Raw ODBC 3.x entry points of the Driver Manager, Unicode (W) variants only: odbc32.dll on Windows,
+/// unixODBC's libodbc on Linux and macOS (resolved by <see cref="DriverManager"/>).
 /// Every ODBC function the tool ever calls is declared here, so the access path is explicit.
-/// Type widths follow the x64 ABI: SQLLEN/SQLULEN are 8 bytes (nint/nuint), SQLINTEGER 4 (int),
+/// Type widths follow the LP64/LLP64 64-bit ABIs: SQLLEN/SQLULEN are 8 bytes (nint/nuint), SQLINTEGER 4 (int),
 /// SQLSMALLINT 2 (short), SQLRETURN 2 (short), handles and SQLPOINTER are pointer-sized (nint).
+/// SQLWCHAR is UTF-16 (char): true for odbc32.dll and for unixODBC, but not for iODBC, whose SQLWCHAR is a
+/// 4-byte wchar_t; that is why iODBC is not supported.
 /// </summary>
 internal static unsafe partial class Native
 {
-    private const string Dll = "odbc32.dll";
+    private const string Dll = DriverManager.LibraryName;
 
     // ---- return codes
     public const short SQL_SUCCESS = 0;
