@@ -1,6 +1,4 @@
 {
-  // OdbcBench insert --config insert.sample.json
-  // The insert section can also live in the same file as the query: "run" ignores it, "insert" ignores the query.
   "baseline": "sqlserver-legacy",
   "dsns": [
     {
