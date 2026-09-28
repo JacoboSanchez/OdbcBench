@@ -18,6 +18,8 @@ internal sealed class CliOptions
     public int? Iterations { get; private set; }
     public int? Warmup { get; private set; }
     public List<int>? BlockSizes { get; private set; }
+    public long? Rows { get; private set; }
+    public string? Table { get; private set; }
     public List<string> Dsns { get; } = new();
     public string? Output { get; private set; }
     public bool Strict { get; private set; }
@@ -39,8 +41,8 @@ internal sealed class CliOptions
                 o.Help = true;
                 return o;
             }
-            if (o.Command is not ("run" or "probe" or "report"))
-                throw new CliException($"unknown command '{args[0]}' (expected run, probe or report)");
+            if (o.Command is not ("run" or "insert" or "probe" or "report"))
+                throw new CliException($"unknown command '{args[0]}' (expected run, insert, probe or report)");
         }
 
         for (; i < args.Length; i++)
@@ -54,9 +56,11 @@ internal sealed class CliOptions
                 case "--query-file": o.QueryFile = Value(); break;
                 case "-n": case "--iterations": o.Iterations = Int(a, Value(), 1); break;
                 case "-w": case "--warmup": o.Warmup = Int(a, Value(), 0); break;
-                case "-b": case "--block-size": case "--block-sizes":
+                case "-b": case "--block-size": case "--block-sizes": case "--batch-size": case "--batch-sizes":
                     o.BlockSizes = Split(Value()).Select(v => Int(a, v, 1)).ToList();
                     break;
+                case "--rows": o.Rows = Long(a, Value(), 1); break;
+                case "--table": o.Table = Value(); break;
                 case "-d": case "--dsn": o.Dsns.AddRange(Split(Value())); break;
                 case "-o": case "--output": o.Output = Value(); break;
                 case "--strict": o.Strict = true; break;
@@ -76,6 +80,12 @@ internal sealed class CliOptions
         if (Iterations is int n) config.Iterations = n;
         if (Warmup is int w) config.WarmupIterations = w;
         if (BlockSizes != null) config.BlockSizes = BlockSizes.Distinct().ToList();
+        if (Rows is long rows) (config.Insert ??= new InsertConfig()).Rows = rows;
+        if (Table != null)
+        {
+            (config.Insert ??= new InsertConfig()).Table = Table;
+            foreach (var d in config.Dsns) d.InsertTable = null; // the command line names the table of every DSN
+        }
         if (Output != null) config.Output.Directory = Output;
         if (Strict) config.Validation.Strict = true;
         if (NoValidate) config.Validation.Enabled = false;
@@ -107,21 +117,32 @@ internal sealed class CliOptions
         return n;
     }
 
+    private static long Long(string option, string value, long min)
+    {
+        if (!long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long n) || n < min)
+            throw new CliException($"{option}: '{value}' is not a whole number >= {min}");
+        return n;
+    }
+
     public const string Usage = """
-        OdbcBench - compare ODBC drivers on the same query through the raw ODBC API (odbc32.dll).
+        OdbcBench - compare ODBC drivers on the same query or batch insert through the raw ODBC API (odbc32.dll).
 
         Usage:
-          OdbcBench run    --config FILE [options]   validate the first rows on every DSN, benchmark, write the report
+          OdbcBench run    --config FILE [options]   validate the first rows on every DSN, benchmark the query, write the report
+          OdbcBench insert --config FILE [options]   benchmark batch inserts of generated rows into a table (parameter arrays)
           OdbcBench probe  --config FILE [--dsn N]   connect, show driver identity, column types and chosen bindings
           OdbcBench report --json FILE [--output DIR]  re-render the Markdown report from a saved JSON result
 
-        Options for run (override the configuration file):
+        Options for run and insert (override the configuration file):
           -c, --config FILE        configuration file (JSON)
           -n, --iterations N       measured iterations per series
           -w, --warmup N           warmup iterations per series (not in the statistics)
-          -b, --block-size N[,N]   row array sizes to benchmark (SQL_ATTR_ROW_ARRAY_SIZE)
+          -b, --block-size N[,N]   row array sizes to benchmark (SQL_ATTR_ROW_ARRAY_SIZE); for insert, the
+              --batch-size N[,N]   parameter array sizes (SQL_ATTR_PARAMSET_SIZE)
           -d, --dsn NAME[,NAME]    only these DSN entries (by name); repeatable
               --query-file FILE    read the query from FILE instead of the configuration
+              --table NAME         insert: target table of every DSN
+              --rows N             insert: rows inserted per iteration
           -o, --output DIR         output directory for the .md and .json files
               --strict             stop before benchmarking when validation fails
               --no-validate        skip the first-rows validation and the dry run

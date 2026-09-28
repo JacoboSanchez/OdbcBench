@@ -4,7 +4,10 @@ using OdbcBench.Odbc;
 
 namespace OdbcBench.Fetch;
 
-/// <summary>Everything measured or counted in one execute-fetch-close cycle.</summary>
+/// <summary>
+/// Everything measured or counted in one iteration: an execute-fetch-close cycle of the query, or one pass of the
+/// batch insert (every SQLExecute of the parameter arrays plus the commit).
+/// </summary>
 public sealed class IterationSample
 {
     /// <summary>Iteration number within its phase (warmup or measured), starting at 1. -1 for the validation dry run.</summary>
@@ -17,30 +20,37 @@ public sealed class IterationSample
 
     /// <summary>Only with connectionPerIteration; never part of TotalMs.</summary>
     public double ConnectMs { get; set; }
-    /// <summary>SQLExecDirectW.</summary>
+    /// <summary>SQLExecDirectW; for the insert benchmark, every SQLExecute call.</summary>
     public double ExecuteMs { get; set; }
-    /// <summary>Describe + bind; non-zero only when the statement was (re)built in this iteration.</summary>
+    /// <summary>Describe + bind (insert: prepare + bind); non-zero only when the statement was (re)built in this iteration.</summary>
     public double DescribeMs { get; set; }
-    /// <summary>First SQLFetchScroll call (the first row array, not the first row).</summary>
+    /// <summary>First SQLFetchScroll call (the first row array, not the first row); for the insert benchmark, the first SQLExecute.</summary>
     public double FirstBatchMs { get; set; }
     /// <summary>Every SQLFetchScroll call plus reading every value.</summary>
     public double FetchMs { get; set; }
     /// <summary>SQLFreeStmt(SQL_CLOSE).</summary>
     public double CloseMs { get; set; }
-    /// <summary>ExecuteMs + DescribeMs + FetchMs + CloseMs.</summary>
+    /// <summary>Insert benchmark: every SQLEndTran(SQL_COMMIT) call.</summary>
+    public double CommitMs { get; set; }
+    /// <summary>Insert benchmark: filling the parameter arrays with generated values; never part of TotalMs.</summary>
+    public double GenerateMs { get; set; }
+    /// <summary>ExecuteMs + DescribeMs + FetchMs + CloseMs + CommitMs.</summary>
     public double TotalMs { get; set; }
 
+    /// <summary>Rows read; for the insert benchmark, rows the driver accepted.</summary>
     public long Rows { get; set; }
     public long Batches { get; set; }
-    /// <summary>Sum of the lengths of every non-NULL value read (data bytes, not wire bytes).</summary>
+    /// <summary>Sum of the lengths of every non-NULL value read or sent (data bytes, not wire bytes).</summary>
     public long Bytes { get; set; }
     /// <summary>True when truncation or SQL_NO_TOTAL made the byte count a lower bound.</summary>
     public bool BytesApprox { get; set; }
     public long Nulls { get; set; }
     public long Truncations { get; set; }
     public long RowErrors { get; set; }
+    /// <summary>Insert benchmark: rows the table gained during the iteration, counted with SELECT COUNT(*); null when not checked.</summary>
+    public long? VerifiedRows { get; set; }
 
-    /// <summary>FNV-1a fingerprint of every value read, per column in row order, combined in column order.</summary>
+    /// <summary>FNV-1a fingerprint of every value read or sent, per column in row order, combined in column order.</summary>
     [JsonIgnore]
     public ulong ChecksumValue { get; set; }
     /// <summary>Hex form of <see cref="ChecksumValue"/>; equal across iterations when the data and its order are stable.</summary>
@@ -52,7 +62,7 @@ public sealed class IterationSample
     public int Gc0 { get; set; }
     public int Gc1 { get; set; }
     public int Gc2 { get; set; }
-    /// <summary>Managed bytes allocated by the fetch loop (expected 0).</summary>
+    /// <summary>Managed bytes allocated by the fetch or insert loop (expected 0).</summary>
     public long AllocatedBytes { get; set; }
     public List<string>? Warnings { get; set; }
 
@@ -70,7 +80,10 @@ public sealed class IterationSample
 /// <summary>Cost of the harness's own value-touching loop, measured by replaying it over the last row array without any ODBC call.</summary>
 public sealed record CalibrationSample(long ValuesPerPass, long BytesPerPass, double MsPerPass, int BoundColumns);
 
-/// <summary>One access path (execute + read every value + close). Only block fetch exists today; others plug in here.</summary>
+/// <summary>
+/// One access path. Block fetch (execute + read every value + close) and batch insert (execute the parameter arrays +
+/// commit) exist today; others plug in here.
+/// </summary>
 public interface IResultReader : IDisposable
 {
     string Description { get; }
@@ -79,8 +92,17 @@ public interface IResultReader : IDisposable
     IReadOnlyList<string> Warnings { get; }
     int CurrentArraySize { get; }
 
-    /// <summary>Runs one complete execute-fetch-close cycle reading every value. <paramref name="rowLimit"/> stops early (dry runs, probe).</summary>
+    /// <summary>
+    /// Untimed work an iteration needs before it starts (the insert path empties and counts the table here).
+    /// Returns the failed sample when that work fails, null when the iteration can run.
+    /// </summary>
+    IterationSample? Prepare(int index, bool warmup) => null;
+
+    /// <summary>Runs one complete iteration touching every value. <paramref name="rowLimit"/> stops early (dry runs, probe).</summary>
     IterationSample Execute(int index, bool warmup, long? rowLimit = null);
+
+    /// <summary>Untimed checks after an iteration (the insert path counts the rows the table gained).</summary>
+    void Verify(IterationSample sample) { }
 
     /// <summary>Replays the value-touching loop over the bound buffers for at least <paramref name="minMs"/>; null when nothing was fetched.</summary>
     CalibrationSample? Calibrate(double minMs = 25);

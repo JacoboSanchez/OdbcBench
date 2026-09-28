@@ -1,0 +1,55 @@
+{
+  // OdbcBench insert --config insert.sample.json
+  // The insert section can also live in the same file as the query: "run" ignores it, "insert" ignores the query.
+  "baseline": "sqlserver-legacy",
+  "dsns": [
+    {
+      "name": "sqlserver-legacy",
+      "connectionString": "Driver={SQL Server};Server=db01;Database=bench",
+      "uid": "bench",
+      "pwdEnv": "BENCH_SQLSERVER_PWD"
+    },
+    {
+      "name": "sqlserver-18",
+      "connectionString": "Driver={ODBC Driver 18 for SQL Server};Server=db01;Database=bench;Encrypt=no",
+      "uid": "bench",
+      "pwdEnv": "BENCH_SQLSERVER_PWD"
+    },
+    {
+      "name": "postgres",
+      "dsn": "PostgreSQL35W",
+      "uid": "bench",
+      "pwdEnv": "BENCH_PG_PWD",
+      "insertTable": "bench.insert_target"
+    }
+  ],
+  "warmupIterations": 2,
+  "iterations": 10,
+  "connectSamples": 3,
+  "blockSizes": [ 1, 100, 1000 ],
+  "bindMode": "native",
+  "reuseStatement": true,
+  "connectionPerIteration": false,
+  "interleave": true,
+  "maxBoundBytes": 268435456,
+  "insert": {
+    "table": "dbo.insert_target",
+    "columns": null,
+    "rows": 100000,
+    "cleanup": "truncate",
+    "transaction": "perIteration",
+    "verify": true,
+    "valueLength": 32
+  },
+  "validation": {
+    "enabled": true,
+    "rows": 10,
+    "strict": false
+  },
+  "output": {
+    "directory": "results",
+    "prefix": "run",
+    "markdown": true,
+    "json": true
+  }
+}

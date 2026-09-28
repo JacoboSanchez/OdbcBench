@@ -4,6 +4,7 @@ using System.Text;
 using OdbcBench.Bench;
 using OdbcBench.Config;
 using OdbcBench.Fetch;
+using OdbcBench.Insert;
 using OdbcBench.Odbc;
 using OdbcBench.Report;
 
@@ -53,7 +54,8 @@ internal static class Program
             {
                 "probe" => Probe(cli),
                 "report" => Report(cli),
-                _ => Run(cli),
+                "insert" => Run(cli, Workload.Insert),
+                _ => Run(cli, Workload.Select),
             };
         }
         catch (Exception ex) when (ex is ConfigException or CliException)
@@ -70,9 +72,9 @@ internal static class Program
 
     // ---------------------------------------------------------------- run
 
-    private static int Run(CliOptions cli)
+    private static int Run(CliOptions cli, Workload workload)
     {
-        var config = LoadConfig(cli);
+        var config = LoadConfig(cli, workload);
         config.ResolvePasswords(PromptPassword);
 
         string outputDirectory = Path.GetFullPath(config.Output.Directory);
@@ -91,6 +93,7 @@ internal static class Program
         {
             var options = new RunOptions
             {
+                Workload = workload,
                 Strict = config.Validation.Strict,
                 Validate = config.Validation.Enabled,
                 Quiet = cli.Quiet,
@@ -100,7 +103,8 @@ internal static class Program
             };
             var run = new BenchmarkRunner(config, options, Console.Error, cancel.Token).Run();
 
-            string stem = Path.Combine(outputDirectory, $"{config.Output.Prefix}-{run.StartedUtc.ToLocalTime():yyyyMMdd-HHmmss}");
+            string prefix = config.Output.Prefix + (workload == Workload.Insert ? "-insert" : "");
+            string stem = Path.Combine(outputDirectory, $"{prefix}-{run.StartedUtc.ToLocalTime():yyyyMMdd-HHmmss}");
             var written = new List<string>();
             if (config.Output.Json)
             {
@@ -122,12 +126,16 @@ internal static class Program
         }
     }
 
-    private static BenchConfig LoadConfig(CliOptions cli)
+    /// <param name="workload">Null checks whatever the file configures: the query, the insert section, or both (probe).</param>
+    private static BenchConfig LoadConfig(CliOptions cli, Workload? workload)
     {
         if (cli.ConfigPath == null) throw new CliException("--config FILE is required");
         var config = BenchConfig.Load(cli.ConfigPath);
         cli.ApplyTo(config);
-        var errors = config.Validate();
+        var errors = workload is Workload w ? config.Validate(w)
+            : config.Insert == null ? config.Validate(Workload.Select)
+            : config.HasQuery ? config.Validate(Workload.Select).Union(config.Validate(Workload.Insert)).ToList()
+            : config.Validate(Workload.Insert);
         if (errors.Count > 0)
             throw new ConfigException("invalid configuration:" + Environment.NewLine + string.Join(Environment.NewLine, errors.Select(e => "  - " + e)));
         return config;
@@ -139,11 +147,17 @@ internal static class Program
         o.WriteLine();
         o.WriteLine($"Outcome    : {run.Outcome} (exit code {run.ExitCode})");
         o.WriteLine($"Validation : {run.Validation?.Status ?? (run.Config.Validation.Enabled ? "not run" : "skipped")}");
+        bool insert = run.Workload == Workload.Insert;
         if (run.Series.Any(s => s.OkCount > 0))
             o.WriteLine($"Row counts : {(run.Consistency.RowCountsMatch ? string.Create(Inv, $"match ({run.Consistency.Rows:N0} rows)") : "DIFFER between DSNs or iterations")}");
+        if (insert && run.Series.Any(s => s.OkCount > 0))
+            o.WriteLine($"Table      : {(!run.Consistency.RowsAccepted ? "the driver did NOT ACCEPT every row"
+                : !run.Consistency.TableRowsMatch ? "its row count DIFFERS from the rows the driver accepted"
+                : run.Consistency.TableChecks > 0 ? "gained the rows that were sent in every iteration"
+                : "not counted")}");
         foreach (var group in run.Series.GroupBy(s => s.BlockSize))
         {
-            o.WriteLine(string.Create(Inv, $"Block size {group.Key:N0}, p50 total per iteration:"));
+            o.WriteLine(string.Create(Inv, $"{(insert ? "Batch" : "Block")} size {group.Key:N0}, p50 total per iteration:"));
             foreach (var s in group)
             {
                 string time = s.Total == null ? s.Status : $"{MarkdownReportWriter.Ms(s.Total.P50),12} ms";
@@ -161,7 +175,7 @@ internal static class Program
 
     private static int Probe(CliOptions cli)
     {
-        var config = LoadConfig(cli);
+        var config = LoadConfig(cli, workload: null);
         config.ResolvePasswords(PromptPassword);
         var o = Console.Out;
         int blockSize = config.BlockSizes[0];
@@ -206,32 +220,68 @@ internal static class Program
                 o.WriteLine($"  SQLGetData   : {di.GetDataExtensionsText}");
                 foreach (var info in connection.Info) o.WriteLine($"  connect info : {info}");
 
-                string query = config.QueryFor(d);
-                using var reader = new BlockFetchReader(connection, query, config.FetchOptions(blockSize));
-                var sample = reader.Execute(1, warmup: true, rowLimit: 1);
-                if (!sample.Ok)
-                {
-                    o.WriteLine($"  query        : FAILED {sample.ErrorMessage}");
-                    failures++;
-                    continue;
-                }
-                o.WriteLine(string.Create(Inv, $"  query        : SQLExecDirectW {MarkdownReportWriter.Ms(sample.ExecuteMs)} ms, first SQLFetchScroll {MarkdownReportWriter.Ms(sample.FirstBatchMs)} ms returned {sample.Rows:N0} rows"));
-                o.WriteLine(string.Create(Inv, $"  row array    : requested {blockSize:N0}, effective {reader.CurrentArraySize:N0}"));
-                if (reader.Columns is { } columns)
-                {
-                    o.WriteLine($"  columns      : {columns.Count}");
-                    o.WriteLine($"    {"#",3}  {"name",-28} {"SQL type",-16} {"size",-10} {"type name",-18} binding");
-                    foreach (var c in columns)
-                    {
-                        bool unbound = reader.Plan?.Unbound.Contains(c) == true;
-                        o.WriteLine($"    {c.Ordinal,3}  {Clip(c.Name, 28),-28} {c.SqlTypeName,-16} {c.SizeText,-10} {Clip(c.TypeName, 18),-18} {(unbound ? $"SQLGetData as {c.CTypeName}" : c.BindingText)}");
-                    }
-                }
-                foreach (var w in reader.Warnings) o.WriteLine($"  note         : {w}");
-                foreach (var w in sample.Warnings ?? new List<string>()) o.WriteLine($"  note         : {w}");
+                if (config.QueryFor(d).Length > 0 && !ProbeQuery(o, config, d, connection, blockSize)) failures++;
+                if (config.Insert != null && config.TableFor(d).Length > 0 && !ProbeInsert(o, config, d, connection, blockSize)) failures++;
             }
         }
         return failures == 0 ? 0 : 1;
+    }
+
+    private static bool ProbeQuery(TextWriter o, BenchConfig config, DsnConfig d, OdbcConnection connection, int blockSize)
+    {
+        using var reader = new BlockFetchReader(connection, config.QueryFor(d), config.FetchOptions(blockSize));
+        var sample = reader.Execute(1, warmup: true, rowLimit: 1);
+        if (!sample.Ok)
+        {
+            o.WriteLine($"  query        : FAILED {sample.ErrorMessage}");
+            return false;
+        }
+        o.WriteLine(string.Create(Inv, $"  query        : SQLExecDirectW {MarkdownReportWriter.Ms(sample.ExecuteMs)} ms, first SQLFetchScroll {MarkdownReportWriter.Ms(sample.FirstBatchMs)} ms returned {sample.Rows:N0} rows"));
+        o.WriteLine(string.Create(Inv, $"  row array    : requested {blockSize:N0}, effective {reader.CurrentArraySize:N0}"));
+        if (reader.Columns is { } columns)
+        {
+            o.WriteLine($"  columns      : {columns.Count}");
+            o.WriteLine($"    {"#",3}  {"name",-28} {"SQL type",-16} {"size",-10} {"type name",-18} binding");
+            foreach (var c in columns)
+            {
+                bool unbound = reader.Plan?.Unbound.Contains(c) == true;
+                o.WriteLine($"    {c.Ordinal,3}  {Clip(c.Name, 28),-28} {c.SqlTypeName,-16} {c.SizeText,-10} {Clip(c.TypeName, 18),-18} {(unbound ? $"SQLGetData as {c.CTypeName}" : c.BindingText)}");
+            }
+        }
+        foreach (var w in reader.Warnings) o.WriteLine($"  note         : {w}");
+        foreach (var w in sample.Warnings ?? new List<string>()) o.WriteLine($"  note         : {w}");
+        return true;
+    }
+
+    /// <summary>Describes the target table, prepares the INSERT and binds the parameter arrays. Nothing is executed, so no row is written.</summary>
+    private static bool ProbeInsert(TextWriter o, BenchConfig config, DsnConfig d, OdbcConnection connection, int batchSize)
+    {
+        var target = config.InsertTargetFor(d);
+        using var writer = new BatchInsertWriter(connection, target, config.InsertOptions(batchSize));
+        var sample = writer.Bind();
+        if (!sample.Ok)
+        {
+            o.WriteLine($"  insert       : FAILED {sample.ErrorMessage}");
+            foreach (var w in writer.Warnings) o.WriteLine($"  note         : {w}");
+            return false;
+        }
+        o.WriteLine($"  insert       : {target.InsertSql}");
+        o.WriteLine($"  prepare+bind : SQLPrepareW + SQLBindParameter {MarkdownReportWriter.Ms(sample.DescribeMs)} ms; nothing was executed");
+        o.WriteLine(string.Create(Inv, $"  param array  : requested {batchSize:N0}, effective {sample.EffectiveBlockSize:N0} (SQL_ATTR_PARAMSET_SIZE)"));
+        o.WriteLine($"  transactions : {(config.TransactionModeValue == TransactionMode.Autocommit ? "autocommit on, as configured"
+            : writer.ManualCommit ? "autocommit off accepted"
+            : "autocommit could NOT be turned off")}" +
+            (connection.GetInfoUInt(Native.SQL_TXN_CAPABLE) == Native.SQL_TC_NONE ? "; the driver reports no transaction support (SQL_TXN_CAPABLE)" : ""));
+        if (target.CleanupSql != null) o.WriteLine($"  cleanup      : {target.CleanupSql} (before every iteration)");
+        o.WriteLine($"  parameters   : {target.Columns.Count}");
+        o.WriteLine($"    {"#",3}  {"name",-28} {"SQL type",-16} {"size",-10} {"type name",-18} {"binding",-26} value of row 1");
+        for (int i = 0; i < target.Columns.Count; i++)
+        {
+            var c = target.Columns[i].Column;
+            o.WriteLine($"    {i + 1,3}  {Clip(c.Name, 28),-28} {c.SqlTypeName,-16} {c.SizeText,-10} {Clip(c.TypeName, 18),-18} {c.BindingText,-26} {Clip(DataGenerator.Text(target.Columns[i], 1), 40)}");
+        }
+        foreach (var w in writer.Warnings) o.WriteLine($"  note         : {w}");
+        return true;
     }
 
     // ---------------------------------------------------------------- report

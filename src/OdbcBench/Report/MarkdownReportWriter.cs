@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text;
 using OdbcBench.Bench;
+using OdbcBench.Config;
 using OdbcBench.Fetch;
+using OdbcBench.Insert;
 using OdbcBench.Validation;
 
 namespace OdbcBench.Report;
@@ -32,9 +34,16 @@ public static class MarkdownReportWriter
 
     // ---------------------------------------------------------------- sections
 
+    private static bool IsInsert(RunResult run) => run.Workload == Workload.Insert;
+
     private static void Header(Md md, RunResult run)
     {
         var cfg = run.Config;
+        if (IsInsert(run))
+        {
+            InsertHeader(md, run);
+            return;
+        }
         md.Heading(1, "ODBC driver performance comparison");
 
         string validation = run.Validation?.Status ?? (cfg.Validation.Enabled ? "not run" : "skipped");
@@ -64,15 +73,69 @@ public static class MarkdownReportWriter
         md.Table(new[] { "Item", "Value" }, rows, "ll");
     }
 
+    private static void InsertHeader(Md md, RunResult run)
+    {
+        var cfg = run.Config;
+        var insert = cfg.Insert ?? new InsertConfig();
+        var c = run.Consistency;
+        md.Heading(1, "ODBC driver batch insert comparison");
+
+        string validation = run.Validation?.Status ?? (cfg.Validation.Enabled ? "not run" : "skipped");
+        string consistency = !run.Series.Any(s => s.OkCount > 0) ? "no data"
+            : !c.RowCountsMatch ? "**ROW COUNTS DIFFER**"
+            : !c.RowsAccepted ? "**ROWS REFUSED**"
+            : !c.TableRowsMatch ? "**TABLE ROW COUNT DIFFERS**"
+            : c.TableChecks > 0 ? "every row sent is in the table"
+            : "row counts match";
+        md.Paragraph($"**Outcome:** {Esc(run.Outcome)} (exit code {run.ExitCode}) · **Validation:** {validation} · **Consistency:** {consistency}");
+
+        string table = string.IsNullOrWhiteSpace(insert.Table) ? "set per DSN" : Code(insert.Table.Trim());
+        string columns = insert.Columns is { Count: > 0 } ? string.Join(", ", insert.Columns.Select(x => Code(x.Trim()))) : "every column that accepts a value";
+        string transactions = cfg.TransactionModeValue switch
+        {
+            TransactionMode.PerBatch => "autocommit off, SQLEndTran(SQL_COMMIT) after every SQLExecute",
+            TransactionMode.Autocommit => "autocommit on: the driver commits every SQLExecute by itself",
+            _ => "autocommit off, one SQLEndTran(SQL_COMMIT) at the end of the iteration",
+        };
+        string cleanup = cfg.CleanupModeValue switch
+        {
+            CleanupMode.Delete => "DELETE FROM the table before every iteration, not timed",
+            CleanupMode.Truncate => "TRUNCATE TABLE before every iteration, not timed",
+            _ => "none: every iteration adds its rows to the table",
+        };
+        var rows = new List<string[]>
+        {
+            new[] { "Run", $"{run.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss", Inv)} UTC, {Duration(run.FinishedUtc - run.StartedUtc)}" },
+            new[] { "Host", $"{Esc(run.Host)}, {run.ProcessBitness} process" },
+            new[] { "Tool", $"OdbcBench {Esc(run.ToolVersion)}" },
+            new[] { "Configuration", run.ConfigPath.Length == 0 ? "–" : $"{Code(run.ConfigPath)} (SHA-256 {Short(run.ConfigSha256)})" },
+            new[] { "Command line", run.CommandLine.Length == 0 ? "–" : Code(run.CommandLine) },
+            new[] { "Target", string.Create(Inv, $"{table}, {insert.Rows:N0} rows per iteration; columns: {columns}") },
+            new[] { "Values", string.Create(Inv, $"generated from the row number, the same rows in every iteration; text and binary values of {insert.ValueLength:N0} characters or bytes, capped at the column size") },
+            new[] { "Iterations", $"{cfg.WarmupIterations} warmup + {cfg.Iterations} measured per series; statistics use measured iterations only" },
+            new[] { "Order", cfg.Interleave ? "interleaved: each round runs every series once, alternating direction between rounds" : "one series after another" },
+            new[] { "Connections", cfg.ConnectionPerIteration ? "new connection every iteration (connect timed separately, not part of total)" : "one connection per DSN, reused by every iteration" },
+            new[] { "Statements", cfg.ReuseStatement ? "one statement per series, reused (prepare and bind once)" : "new statement every iteration (prepare and bind are part of total)" },
+            new[] { "Binding", $"column-wise parameter arrays, {(cfg.BindMode.Equals("wchar", StringComparison.OrdinalIgnoreCase) ? "every parameter as SQL_C_WCHAR (binary as SQL_C_BINARY)" : "native C types")}" },
+            new[] { "Transactions", transactions },
+            new[] { "Cleanup", cleanup },
+            new[] { "Row count check", insert.Verify ? "SELECT COUNT(*) on the table before and after every iteration, not timed" : "off" },
+            new[] { "Total time", "prepare/bind (only when the statement is built) + every SQLExecute + SQLEndTran(SQL_COMMIT); generating the values is not included" },
+            new[] { "Baseline", run.BaselineDsn.Length == 0 ? "–" : Esc(run.BaselineDsn) },
+        };
+        md.Table(new[] { "Item", "Value" }, rows, "ll");
+    }
+
     private static void Summary(Md md, RunResult run)
     {
+        bool insert = IsInsert(run);
         md.Heading(2, "Summary");
         var bullets = new List<string>();
 
         foreach (int bs in BlockSizes(run))
         {
             var done = run.Series.Where(s => s.BlockSize == bs && s.Total != null).ToList();
-            string label = string.Create(Inv, $"**Block size {bs:N0}:**");
+            string label = string.Create(Inv, $"**{(insert ? "Batch" : "Block")} size {bs:N0}:**");
             if (done.Count == 0)
             {
                 bullets.Add($"{label} no series completed.");
@@ -106,10 +169,16 @@ public static class MarkdownReportWriter
         if (run.Series.Any(s => s.OkCount > 0))
         {
             if (run.Consistency.RowCountsMatch && run.Consistency.Rows is long n)
-                bullets.Add(string.Create(Inv, $"Every successful iteration of every DSN returned {n:N0} rows."));
+                bullets.Add(string.Create(Inv, $"Every successful iteration of every DSN {(insert ? "inserted" : "returned")} {n:N0} rows."));
             else if (!run.Consistency.RowCountsMatch)
-                bullets.Add("**Row counts differ between DSNs or iterations: the DSNs did not return the same result.** See [Data consistency](#data-consistency).");
+                bullets.Add(insert
+                    ? "**Row counts differ between DSNs or iterations: the DSNs did not insert the same number of rows.** See [Data consistency](#data-consistency)."
+                    : "**Row counts differ between DSNs or iterations: the DSNs did not return the same result.** See [Data consistency](#data-consistency).");
         }
+        if (insert && !run.Consistency.RowsAccepted)
+            bullets.Add("**A driver did not accept every row it was sent.** See [Data consistency](#data-consistency).");
+        if (insert && !run.Consistency.TableRowsMatch)
+            bullets.Add("**The table did not gain the rows a driver reported as inserted.** See [Data consistency](#data-consistency).");
 
         if (run.Validation is { } v)
             bullets.Add($"Validation of the first {run.Config.Validation.Rows} rows: **{v.Status}** ({Count(v.FailCount, "failure")}, {Count(v.WarnCount, "warning")}).");
@@ -134,9 +203,11 @@ public static class MarkdownReportWriter
 
         var blockSizes = BlockSizes(run).ToList();
         if (blockSizes.Count == 0) return;
-        md.Paragraph("p50 of the total time per iteration (execute, read every row and value, close). Ratios are relative to the baseline; below 1.00× is faster.");
+        md.Paragraph(insert
+            ? "p50 of the total time per iteration (prepare when the statement is built, every SQLExecute, commit). Ratios are relative to the baseline; below 1.00× is faster."
+            : "p50 of the total time per iteration (execute, read every row and value, close). Ratios are relative to the baseline; below 1.00× is faster.");
         var headers = new List<string> { "DSN", "Driver" };
-        headers.AddRange(blockSizes.Select(b => string.Create(Inv, $"Block {b:N0}")));
+        headers.AddRange(blockSizes.Select(b => string.Create(Inv, $"{(insert ? "Batch" : "Block")} {b:N0}")));
         var rows = new List<string[]>();
         foreach (var d in run.Dsns)
         {
@@ -203,6 +274,19 @@ public static class MarkdownReportWriter
 
     private static void QuerySection(Md md, RunResult run)
     {
+        if (IsInsert(run))
+        {
+            md.Heading(2, "Insert statement");
+            md.Paragraph("Built from the columns the driver describes for the table. One SQLExecute sends one array of rows.");
+            md.Fenced("sql", run.Query);
+            foreach (var d in run.Dsns.Where(d => d.QueryOverridden && d.Query != null))
+            {
+                md.Paragraph($"{Esc(d.Name)} runs its own statement:");
+                md.Fenced("sql", d.Query!);
+            }
+            return;
+        }
+
         md.Heading(2, "Query");
         md.Fenced("sql", run.Query);
         foreach (var d in run.Dsns.Where(d => d.QueryOverridden && d.Query != null))
@@ -224,11 +308,21 @@ public static class MarkdownReportWriter
         }
 
         var n = cfg.Normalization;
-        md.Paragraph($"**{v.Status}**: {v.RowsCompared} rows compared across {v.DsnsCompared} DSNs against {Esc(v.BaselineDsn)}. " +
-                     "Each DSN's rows were read with SQLFetch and SQLGetData as text, independently of the block-fetch path. " +
-                     $"Before comparing: trailing spaces {(n.TrimTrailingSpaces ? "trimmed" : "kept")}; NULL {(n.NullEqualsEmpty ? "equals" : "differs from")} the empty string; " +
-                     $"decimals compared by value; floats with a relative tolerance of {n.FloatTolerance.ToString("G3", Inv)}; " +
-                     "dates and times parsed, with fractional seconds compared at the coarser precision of the two.");
+        string normalization =
+            $"Before comparing: trailing spaces {(n.TrimTrailingSpaces ? "trimmed" : "kept")}; NULL {(n.NullEqualsEmpty ? "equals" : "differs from")} the empty string; " +
+            $"decimals compared by value; floats with a relative tolerance of {n.FloatTolerance.ToString("G3", Inv)}; " +
+            "dates and times parsed, with fractional seconds compared at the coarser precision of the two.";
+        if (!IsInsert(run))
+            md.Paragraph($"**{v.Status}**: {v.RowsCompared} rows compared across {v.DsnsCompared} DSNs against {Esc(v.BaselineDsn)}. " +
+                         "Each DSN's rows were read with SQLFetch and SQLGetData as text, independently of the block-fetch path. " +
+                         normalization);
+        else if (v.DsnsCompared == 0)
+            md.Paragraph($"**{v.Status}**: every series wrote its first rows in a dry run through the batch insert path. The rows were not read back.");
+        else
+            md.Paragraph($"**{v.Status}**: every series wrote its first rows in a dry run through the batch insert path. " +
+                         $"The {v.RowsCompared} rows each DSN wrote last were then read back through that DSN with SQLFetch and SQLGetData as text, " +
+                         $"and compared with the values that were sent, shown as {Esc(v.BaselineDsn)}. {Count(v.DsnsCompared - 1, "DSN")} compared. " +
+                         normalization);
 
         if (v.Metadata.Count > 0)
         {
@@ -276,8 +370,16 @@ public static class MarkdownReportWriter
             .ToList();
         if (perDsn.Count == 0) return;
 
-        md.Heading(2, "Column bindings");
-        md.Paragraph("How each column was described by the driver (SQLDescribeColW) and bound for block fetch (SQLBindCol target type × element size). Columns marked SQLGetData are read in chunks after each fetch.");
+        if (IsInsert(run))
+        {
+            md.Heading(2, "Parameter bindings");
+            md.Paragraph("How each target column was described by the driver (SQLDescribeColW on an empty SELECT of the table) and bound as a parameter array (SQLBindParameter C type × element size).");
+        }
+        else
+        {
+            md.Heading(2, "Column bindings");
+            md.Paragraph("How each column was described by the driver (SQLDescribeColW) and bound for block fetch (SQLBindCol target type × element size). Columns marked SQLGetData are read in chunks after each fetch.");
+        }
         int columns = perDsn.Max(s => s.Columns.Count);
         var headers = new List<string> { "#", "Column" };
         headers.AddRange(perDsn.Select(s => Esc(s.DsnName)));
@@ -304,12 +406,15 @@ public static class MarkdownReportWriter
 
     private static void ResultsSection(Md md, RunResult run, int blockSize)
     {
+        bool insert = IsInsert(run);
         var group = run.Series.Where(s => s.BlockSize == blockSize).ToList();
-        md.Heading(2, string.Create(Inv, $"Results: block size {blockSize:N0}"));
+        md.Heading(2, string.Create(Inv, $"Results: {(insert ? "batch" : "block")} size {blockSize:N0}"));
 
         var effective = group.Where(s => s.EffectiveBlockSize > 0).Select(s => string.Create(Inv, $"{Esc(s.DsnName)} {s.EffectiveBlockSize:N0}")).ToList();
-        string effectiveText = effective.Count == 0 ? "" : $" Effective row array size: {string.Join(", ", effective)}.";
-        md.Paragraph(string.Create(Inv, $"Requested row array size {blockSize:N0} (SQL_ATTR_ROW_ARRAY_SIZE).{effectiveText}"));
+        string effectiveText = effective.Count == 0 ? "" : $" Effective {(insert ? "parameter" : "row")} array size: {string.Join(", ", effective)}.";
+        md.Paragraph(insert
+            ? string.Create(Inv, $"Requested parameter array size {blockSize:N0} (SQL_ATTR_PARAMSET_SIZE).{effectiveText}")
+            : string.Create(Inv, $"Requested row array size {blockSize:N0} (SQL_ATTR_ROW_ARRAY_SIZE).{effectiveText}"));
 
         md.Heading(3, "Total time per iteration (ms)");
         md.Table(new[] { "DSN", "Status", "OK", "Min", "p50", "Mean", "p95", "Max", "Std dev", "CV", "Outliers", "vs baseline" },
@@ -324,6 +429,64 @@ public static class MarkdownReportWriter
                 s.IsBaseline ? "baseline" : s.RatioToBaseline == null ? "–" : $"{Ratio(s.RatioToBaseline)} ({Signed(s.PercentVsBaseline!.Value)})",
             }), "lllrrrrrrrrr");
 
+        if (insert) InsertBreakdown(md, group);
+        else FetchBreakdown(md, group);
+
+        var notes = group.SelectMany(s => s.Warnings.Select(w => (s.DsnName, w))).ToList();
+        if (notes.Count > 0)
+        {
+            md.Line("Notes:");
+            md.Line();
+            foreach (var (dsn, w) in notes) md.Line($"- {Esc(dsn)}: {Esc(w)}");
+            md.Line();
+        }
+    }
+
+    private static void InsertBreakdown(Md md, List<SeriesResult> group)
+    {
+        bool prepare = group.Any(s => s.Describe != null);
+        bool connect = group.Any(s => s.Connect != null);
+        md.Heading(3, "Where the time goes (p50, ms)");
+        var headers = new List<string> { "DSN", "Execute", "First batch", "Commit" };
+        if (prepare) headers.Add("Prepare + bind");
+        headers.Add("Generate (not in total)");
+        if (connect) headers.Add("Connect (not in total)");
+        md.Table(headers, group.Select(s =>
+        {
+            var row = new List<string> { Esc(s.DsnName), Ms(s.Execute?.P50), Ms(s.FirstBatch?.P50), Ms(s.Commit?.P50) };
+            if (prepare) row.Add(Ms(s.Describe?.P50));
+            row.Add(Ms(s.Generate?.P50));
+            if (connect) row.Add(Ms(s.Connect?.P50));
+            return row.ToArray();
+        }), "l" + new string('r', headers.Count - 1));
+        md.Paragraph("Execute covers every SQLExecute call, one per parameter array, first batch included. First batch is the first SQLExecute. " +
+                     "Commit is every SQLEndTran(SQL_COMMIT); a dash means the driver commits by itself. " +
+                     "Generate is the time the tool took to fill the parameter arrays, which happens between the timed calls.");
+
+        md.Heading(3, "Throughput and resources (medians per iteration)");
+        md.Table(new[] { "DSN", "Rows", "Data MB", "Rows/s", "MB/s", "CPU", "Rejected rows", "GCs", "Insert-loop alloc B", "Effective batch" },
+            group.Select(s => s.Total == null
+                ? new[] { Esc(s.DsnName), "–", "–", "–", "–", "–", "–", "–", "–", s.EffectiveBlockSize > 0 ? s.EffectiveBlockSize.ToString("N0", Inv) : "–" }
+                : new[]
+                {
+                    Esc(s.DsnName),
+                    s.Rows.ToString("N0", Inv) + (s.RowsVary ? " (varies)" : ""),
+                    (s.MedianBytes / 1e6).ToString("N2", Inv),
+                    s.RowsPerSecond.ToString("N0", Inv),
+                    s.MegabytesPerSecond.ToString("N2", Inv),
+                    Pct(s.CpuPercent),
+                    s.RowErrors.ToString("N0", Inv),
+                    s.GcCollections.ToString("N0", Inv),
+                    s.AllocatedBytes.ToString("N0", Inv),
+                    s.EffectiveBlockSize.ToString("N0", Inv),
+                }), "lrrrrrrrrr");
+        md.Paragraph("Data MB counts the bytes of every value as sent in its C type (10^6 bytes), not network bytes. " +
+                     "Rows/s and MB/s divide by the total time. CPU is process user + kernel time, generating the values included, over the total time; above 100% means the driver used several threads. " +
+                     "Windows accounts CPU time in ticks of about 15.6 ms, so CPU figures are coarse for short iterations.");
+    }
+
+    private static void FetchBreakdown(Md md, List<SeriesResult> group)
+    {
         bool describe = group.Any(s => s.Describe != null);
         bool connect = group.Any(s => s.Connect != null);
         md.Heading(3, "Where the time goes (p50, ms)");
@@ -359,15 +522,48 @@ public static class MarkdownReportWriter
                 }), "lrrrrrrrrr");
         md.Paragraph("Data MB counts the bytes of every non-NULL value as delivered in its C type (10^6 bytes), not network bytes. " +
                      "Rows/s and MB/s divide by the total time. CPU is process user + kernel time over wall time; above 100% means the driver used several threads. Windows accounts CPU time in ticks of about 15.6 ms, so CPU figures are coarse for short iterations.");
+    }
 
-        var notes = group.SelectMany(s => s.Warnings.Select(w => (s.DsnName, w))).ToList();
-        if (notes.Count > 0)
-        {
-            md.Line("Notes:");
-            md.Line();
-            foreach (var (dsn, w) in notes) md.Line($"- {Esc(dsn)}: {Esc(w)}");
-            md.Line();
-        }
+    private static void InsertConsistency(Md md, RunResult run, List<SeriesResult> withData)
+    {
+        var c = run.Consistency;
+        md.Bullet(c.RowCountsMatch
+            ? $"**Row counts:** every successful iteration inserted {c.Rows?.ToString("N0", Inv) ?? "the same number of"} rows."
+            : "**Row counts: FAIL.** Different DSNs or iterations inserted different numbers of rows.");
+        md.Bullet(c.RowsAccepted
+            ? "**Accepted:** every driver accepted every row it was sent."
+            : "**Accepted: FAIL.** A driver rejected rows (SQL_PARAM_ERROR) or left part of a parameter array unprocessed.");
+        md.Bullet(c.TableChecks == 0
+            ? "**Table:** the rows of the table were not counted."
+            : c.TableRowsMatch
+                ? $"**Table:** in each of the {c.TableChecks.ToString("N0", Inv)} iterations counted, the table gained exactly the rows the driver accepted."
+                : "**Table: FAIL.** The table did not gain the rows a driver reported as inserted: that driver does not write the whole parameter array, or something else writes to the table.");
+        md.Bullet(c.ChecksumsStable
+            ? "**Values:** every series sent the same values in every iteration."
+            : "**Values: WARN.** A series sent different values in different iterations.");
+        if (withData.Select(s => s.BlockSize).Distinct().Count() > 1)
+            md.Bullet(c.BlockSizeChecksumsEqual
+                ? "**Batch sizes:** each DSN was sent the same values at every batch size."
+                : "**Batch sizes: WARN.** A DSN was sent different values depending on the batch size.");
+        if (withData.Select(s => s.DsnName).Distinct().Count() > 1)
+            md.Bullet(c.CrossDsnChecksumsEqual
+                ? "**Across DSNs:** all DSNs were sent byte-identical values."
+                : "**Across DSNs (informational):** checksums differ. The drivers describe the columns of the table differently, " +
+                  "so a value was generated or bound differently, for example an integer of another width. The validation section compares what was stored.");
+        foreach (var note in c.Notes) md.Bullet(Esc(note));
+        md.Line();
+
+        md.Table(new[] { "Series", "Rows accepted", "Rows the table gained", "Checksum of the values sent", "Stable" },
+            withData.Select(s =>
+            {
+                var counted = s.Samples.Where(x => x.Ok && x.VerifiedRows != null).Select(x => x.VerifiedRows!.Value).Distinct().ToList();
+                return new[]
+                {
+                    Esc(s.Key), s.Rows.ToString("N0", Inv) + (s.RowsVary ? " (varies)" : ""),
+                    counted.Count == 0 ? "not counted" : counted[0].ToString("N0", Inv) + (counted.Count > 1 ? " (varies)" : ""),
+                    Code(s.Checksum ?? "–"), s.ChecksumStable ? "yes" : "**no**",
+                };
+            }), "lrrll");
     }
 
     private static void ConsistencySection(Md md, RunResult run)
@@ -378,6 +574,11 @@ public static class MarkdownReportWriter
         if (withData.Count == 0)
         {
             md.Paragraph("No iteration completed, so there is nothing to check.");
+            return;
+        }
+        if (IsInsert(run))
+        {
+            InsertConsistency(md, run, withData);
             return;
         }
 
@@ -445,6 +646,7 @@ public static class MarkdownReportWriter
     {
         var series = run.Series.Where(s => s.Samples.Count > 0).ToList();
         if (series.Count == 0) return;
+        bool insert = IsInsert(run);
         md.Heading(2, "Appendix: every iteration");
         md.Paragraph("Times in ms. Warmup iterations are listed but never enter the statistics.");
         foreach (var s in series)
@@ -452,18 +654,31 @@ public static class MarkdownReportWriter
             md.Line("<details>");
             md.Line($"<summary>{Esc(s.Key)}: {s.Samples.Count} iterations</summary>");
             md.Line();
-            md.Table(new[] { "Phase", "#", "Total", "Execute", "First batch", "Fetch", "Close", "Rows", "CPU", "Checksum", "Result" },
-                s.Samples.Select(x => new[]
-                {
-                    x.Warmup ? "warmup" : "measured", x.Index.ToString(Inv),
-                    Ms(x.TotalMs), Ms(x.ExecuteMs), Ms(x.FirstBatchMs), Ms(x.FetchMs), Ms(x.CloseMs),
-                    x.Rows.ToString("N0", Inv), Ms(x.CpuMs), x.Ok ? Code(x.Checksum) : "",
-                    x.Ok ? "ok" : $"**failed** {(x.ErrorSqlState != null ? $"[{x.ErrorSqlState}] " : "")}{Esc(Truncate(x.ErrorMessage ?? "", 120))}",
-                }), "lrrrrrrrrll");
+            if (insert)
+                md.Table(new[] { "Phase", "#", "Total", "Execute", "First batch", "Commit", "Generate", "Rows", "Table gained", "CPU", "Result" },
+                    s.Samples.Select(x => new[]
+                    {
+                        x.Warmup ? "warmup" : "measured", x.Index.ToString(Inv),
+                        Ms(x.TotalMs), Ms(x.ExecuteMs), Ms(x.FirstBatchMs), Ms(x.CommitMs), Ms(x.GenerateMs),
+                        x.Rows.ToString("N0", Inv), x.VerifiedRows?.ToString("N0", Inv) ?? "", Ms(x.CpuMs),
+                        Result(x),
+                    }), "lrrrrrrrrrl");
+            else
+                md.Table(new[] { "Phase", "#", "Total", "Execute", "First batch", "Fetch", "Close", "Rows", "CPU", "Checksum", "Result" },
+                    s.Samples.Select(x => new[]
+                    {
+                        x.Warmup ? "warmup" : "measured", x.Index.ToString(Inv),
+                        Ms(x.TotalMs), Ms(x.ExecuteMs), Ms(x.FirstBatchMs), Ms(x.FetchMs), Ms(x.CloseMs),
+                        x.Rows.ToString("N0", Inv), Ms(x.CpuMs), x.Ok ? Code(x.Checksum) : "",
+                        Result(x),
+                    }), "lrrrrrrrrll");
             md.Line("</details>");
             md.Line();
         }
     }
+
+    private static string Result(IterationSample x) =>
+        x.Ok ? "ok" : $"**failed** {(x.ErrorSqlState != null ? $"[{x.ErrorSqlState}] " : "")}{Esc(Truncate(x.ErrorMessage ?? "", 120))}";
 
     // ---------------------------------------------------------------- helpers
 

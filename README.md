@@ -1,10 +1,12 @@
 # OdbcBench
 
-OdbcBench compares ODBC drivers, or versions of one driver, on the same `SELECT`. For every configured DSN it:
+OdbcBench compares ODBC drivers, or versions of one driver, on the same `SELECT` or on the same batch insert. For every configured DSN it:
 
 1. **Validates** that the first rows (10 by default) and the result-set metadata are the same on every DSN.
 2. **Benchmarks** the query with warmup and measured iterations. Each iteration executes the query and reads every row and every column value without storing them.
 3. **Writes a comparison report** in Markdown, plus a JSON file with every sample.
+
+`OdbcBench insert` does the same for writes: it inserts generated rows into a table with parameter arrays and compares the drivers. See [Batch insert benchmark](#batch-insert-benchmark).
 
 The tool calls the ODBC API directly in `odbc32.dll`, the Windows Driver Manager. It uses no wrapper such as pyodbc or System.Data.Odbc, so every ODBC function in the measured path is explicit and listed below.
 
@@ -46,22 +48,26 @@ Before comparing two drivers, run an **A/A test**: list the same DSN twice under
 
 ```text
 OdbcBench run    --config FILE [options]
+OdbcBench insert --config FILE [options]
 OdbcBench probe  --config FILE [--dsn NAME]
 OdbcBench report --json FILE [--output DIR]
 
   -c, --config FILE        configuration file (JSON)
   -n, --iterations N       measured iterations per series
   -w, --warmup N           warmup iterations per series
-  -b, --block-size N[,N]   row array sizes to benchmark
+  -b, --block-size N[,N]   row array sizes to benchmark; for insert, parameter array sizes
+      --batch-size N[,N]   same as --block-size
   -d, --dsn NAME[,NAME]    only these DSN entries
       --query-file FILE    read the query from FILE
+      --table NAME         insert: target table of every DSN
+      --rows N             insert: rows inserted per iteration
   -o, --output DIR         output directory
       --strict             stop before benchmarking when validation fails
       --no-validate        skip validation and the dry run
       --quiet              no progress output
 ```
 
-`report` re-renders the Markdown from a saved JSON result.
+`report` re-renders the Markdown from a saved JSON result, for either workload.
 
 Press Ctrl+C once to stop after the current iteration and write partial results. Press it a second time to abort immediately.
 
@@ -184,6 +190,49 @@ Percentiles use the nearest-rank method. Outliers, meaning samples above p50 + 3
 - Engines with result caches, such as Dremio reflections, can make repeated executions unrealistically fast. Compare with `cacheBuster: true` if that matters.
 - When DSNs point at different database engines, the comparison covers engine plus driver, not the driver alone.
 
+## Batch insert benchmark
+
+`OdbcBench insert` writes generated rows into a table through every DSN and compares how long the drivers take. It uses the settings above (DSNs, iterations, warmup, interleaving, `bindMode`, `reuseStatement`, `connectionPerIteration`, `maxBoundBytes`) plus an `insert` section. `blockSizes`, or `--batch-size`, gives the parameter array sizes, one series each. A single configuration file can hold both the query and the `insert` section.
+
+1. Create an empty table that every DSN can write to. The tool never creates or drops tables. Without `cleanup`, the table must accept the same rows again in every iteration.
+2. Add the `insert` section. `samples\insert.sample.json` has a complete example.
+3. `OdbcBench probe --config bench.json` describes the table, prepares the INSERT and binds the parameters without executing anything. It shows the statement, the effective parameter array size, whether autocommit can be turned off, and the value each column receives for row 1.
+4. `OdbcBench insert --config bench.json` runs the benchmark. The report lands in `results\run-insert-<date>-<time>.md`.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `insert.table` | | Target table, written as it appears in SQL, for example `dbo.orders` or `"sales"."orders"`. |
+| `dsns[].insertTable` | | Per-DSN table, for naming or quoting differences. `--table` overrides both. |
+| `insert.columns` | every column | Columns to fill, written as they appear in SQL. By default every column the driver describes, except auto-increment columns and types the generator has no values for (XML, intervals, UDTs). Those are listed in the report. |
+| `insert.rows` | `100000` | Rows per iteration. |
+| `insert.cleanup` | `none` | `delete` or `truncate` empties the table before every iteration, outside the timers. `none` leaves the rows, so the table grows. |
+| `insert.transaction` | `perIteration` | `perIteration`: autocommit off and one commit at the end. `perBatch`: a commit after every SQLExecute. `autocommit`: the driver commits every SQLExecute by itself. |
+| `insert.verify` | `true` | Runs `SELECT COUNT(*)` on the table before and after every iteration, outside the timers. |
+| `insert.valueLength` | `32` | Characters or bytes for text and binary values, capped at the column size. |
+
+**Values.** Every value is a function of the column type and the row number, so every DSN, batch size and iteration sends the same rows. Integers are the row number, wrapped to the column's range. Text starts with the zero-padded row number. Floats are exact quarters. Dates, times and timestamps count days or seconds from 2000-01-01. GUIDs are version 4 shaped. Decimals fit the column's precision and scale. No value is NULL.
+
+**Per iteration.** Only these calls are timed:
+
+| Timer | ODBC calls |
+|---|---|
+| prepare + bind | `SQLPrepareW` and `SQLBindParameter`, with column-wise parameter arrays. Only when the statement is built: the dry run, the first warmup, or every iteration with `reuseStatement: false`. |
+| execute | Every `SQLExecute`, one per parameter array. It includes the `SQLSetStmtAttrW(SQL_ATTR_PARAMSET_SIZE)` for a shorter last array. |
+| first batch | The first `SQLExecute`. |
+| commit | Every `SQLEndTran(SQL_COMMIT)`. |
+| total | prepare/bind + execute + commit |
+| generate | Filling the parameter arrays. It happens between the timed calls, is reported separately, and is not part of the total. |
+
+`SQL_ATTR_PARAMSET_SIZE` is read back, because drivers may lower it. A driver without parameter arrays gets one row per `SQLExecute`, and the report shows an effective batch size of 1. Rejected rows are counted from `SQL_ATTR_PARAM_STATUS_PTR`. `SQLRowCount` is not used: drivers without `SQL_PARC_BATCH`, such as psqlODBC, report only the last row of each array. The insert loop allocates no managed memory; the report shows this per iteration.
+
+Numeric, integer, float, bit, date, timestamp and GUID columns bind as their C types. Text, decimals, times with fractional seconds and `datetimeoffset` bind as `SQL_C_WCHAR`. Binary binds as `SQL_C_BINARY`, even in `bindMode: wchar`. When a driver rejects a binding (07006, HY003, HY004 or HYC00), that column falls back to text and the report says so. psqlODBC describes `boolean` as text; those columns still receive `0` and `1`.
+
+**Validation.** Every series first writes the first rows (`validation.rows`) in a dry run through the real batch path. With `cleanup` set, each DSN then reads its rows back with `SQLFetch` and `SQLGetData`, independently of the insert path. They are compared with the values that were sent, using the normalisation of the SELECT validation, and the report shows the sent values as the `(sent)` column. With `cleanup: none`, the table also holds rows from other iterations, so nothing is read back.
+
+**Consistency.** Every driver must accept every row, and in every counted iteration the table must gain exactly the rows the driver accepted. A driver that reports success without writing the whole array fails this check, and the exit code is 1.
+
+**Before comparing drivers.** Driver logging can dominate the times. psqlODBC DSNs sometimes have `Debug` or `CommLog` on; `extraAttributes: "Debug=0;CommLog=0"` turns them off for the run. Commit costs depend on the server's durability settings, so compare DSNs that point at the same server.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -193,6 +242,10 @@ Percentiles use the nearest-rank method. Outliers, meaning samples above p50 + 3
 | Row array size changed | The driver capped `SQL_ATTR_ROW_ARRAY_SIZE` (SQLSTATE 01S02). The report shows the effective value. |
 | Truncated values | The driver reports column sizes smaller than the data. Raise `longColumnThresholdBytes` or use `bindMode: wchar`. |
 | `SQL_ATTR_QUERY_TIMEOUT ... not accepted` | Informational: some drivers do not support query timeouts. |
+| Insert: `SQL_ATTR_PARAMSET_SIZE ... not accepted` | The driver has no parameter arrays, for example the Access driver. Every SQLExecute sends one row, and the batch sizes then measure the same thing. |
+| Insert: duplicate key (SQLSTATE 23xxx) | The table has a unique constraint and `cleanup` is `none`, so the second iteration inserts the same keys again. Use `delete` or `truncate`. |
+| Insert: autocommit could not be turned off | The driver has no transactions. Every SQLExecute commits by itself and no commit time is reported. |
+| Insert: a column cannot be written | Computed columns and `rowversion` accept no values. List the other columns in `insert.columns`. |
 
 ## Project layout
 
@@ -200,7 +253,8 @@ Percentiles use the nearest-rank method. Outliers, meaning samples above p50 + 3
 |---|---|
 | `src\OdbcBench\Odbc` | P/Invoke declarations and thin wrappers for the environment, connection and statement handles, type mapping, and registry hints. |
 | `src\OdbcBench\Fetch` | The block-fetch reader, binding plan, column buffers, and chunked `SQLGetData`. |
+| `src\OdbcBench\Insert` | The batch insert writer, target table description, parameter mapping, and value generator. |
 | `src\OdbcBench\Validation` | Sample reader, value normalisation and comparison. |
 | `src\OdbcBench\Bench` | Runner, statistics, analysis and system information. |
 | `src\OdbcBench\Report` | Result model, JSON writer and Markdown writer. |
-| `tests\OdbcBench.Tests` | Unit tests and the golden report (`Golden\report.md`). After an intended report change, regenerate it with `UPDATE_GOLDEN=1`. |
+| `tests\OdbcBench.Tests` | Unit tests and the golden reports (`Golden\report.md`, `Golden\insert-report.md`). After an intended report change, regenerate them with `UPDATE_GOLDEN=1`. |

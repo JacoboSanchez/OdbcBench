@@ -42,6 +42,12 @@ internal static unsafe partial class Native
     // ---- connection attributes
     public const int SQL_ATTR_AUTOCOMMIT = 102;
     public const int SQL_ATTR_LOGIN_TIMEOUT = 103;
+    public const uint SQL_AUTOCOMMIT_OFF = 0;
+    public const uint SQL_AUTOCOMMIT_ON = 1;
+
+    // ---- transactions (SQLEndTran completion types)
+    public const short SQL_COMMIT = 0;
+    public const short SQL_ROLLBACK = 1;
 
     // ---- statement attributes
     public const int SQL_ATTR_QUERY_TIMEOUT = 0;
@@ -49,12 +55,25 @@ internal static unsafe partial class Native
     public const int SQL_ATTR_ROW_BIND_TYPE = 5;
     public const int SQL_ATTR_CURSOR_TYPE = 6;
     public const int SQL_ATTR_CONCURRENCY = 7;
+    public const int SQL_ATTR_PARAM_BIND_TYPE = 18;
+    public const int SQL_ATTR_PARAM_STATUS_PTR = 20;
+    public const int SQL_ATTR_PARAMS_PROCESSED_PTR = 21;
+    public const int SQL_ATTR_PARAMSET_SIZE = 22;
     public const int SQL_ATTR_ROW_STATUS_PTR = 25;
     public const int SQL_ATTR_ROWS_FETCHED_PTR = 26;
     public const int SQL_ATTR_ROW_ARRAY_SIZE = 27;
     public const uint SQL_CURSOR_FORWARD_ONLY = 0;
     public const uint SQL_CONCUR_READ_ONLY = 1;
     public const uint SQL_BIND_BY_COLUMN = 0;
+    public const uint SQL_PARAM_BIND_BY_COLUMN = 0;
+
+    // ---- parameters
+    public const short SQL_PARAM_INPUT = 1;
+    public const ushort SQL_PARAM_SUCCESS = 0;
+    public const ushort SQL_PARAM_DIAG_UNAVAILABLE = 1;
+    public const ushort SQL_PARAM_ERROR = 5;
+    public const ushort SQL_PARAM_SUCCESS_WITH_INFO = 6;
+    public const ushort SQL_PARAM_UNUSED = 7;
 
     // ---- attribute length codes
     public const int SQL_IS_POINTER = -4;
@@ -86,6 +105,8 @@ internal static unsafe partial class Native
     public const ushort SQL_SERVER_NAME = 13;
     public const ushort SQL_DBMS_NAME = 17;
     public const ushort SQL_DBMS_VER = 18;
+    public const ushort SQL_IDENTIFIER_QUOTE_CHAR = 29;
+    public const ushort SQL_TXN_CAPABLE = 46;
     public const ushort SQL_DRIVER_HLIB = 76;
     public const ushort SQL_DRIVER_ODBC_VER = 77;
     public const ushort SQL_GETDATA_EXTENSIONS = 81;
@@ -94,11 +115,13 @@ internal static unsafe partial class Native
     public const uint SQL_GD_ANY_ORDER = 0x2;
     public const uint SQL_GD_BLOCK = 0x4;
     public const uint SQL_GD_BOUND = 0x8;
+    public const uint SQL_TC_NONE = 0;
 
     // ---- SQLColAttribute field identifiers
     public const ushort SQL_DESC_CONCISE_TYPE = 2;
     public const ushort SQL_DESC_DISPLAY_SIZE = 6;
     public const ushort SQL_DESC_UNSIGNED = 8;
+    public const ushort SQL_DESC_AUTO_UNIQUE_VALUE = 11;
     public const ushort SQL_DESC_TYPE_NAME = 14;
     public const ushort SQL_DESC_TYPE = 1002;
     public const ushort SQL_DESC_LENGTH = 1003;
@@ -199,6 +222,23 @@ internal static unsafe partial class Native
 
     [LibraryImport(Dll)]
     public static partial short SQLExecDirectW(nint statement, char* statementText, int textLength);
+
+    [LibraryImport(Dll)]
+    public static partial short SQLPrepareW(nint statement, char* statementText, int textLength);
+
+    [LibraryImport(Dll)]
+    public static partial short SQLExecute(nint statement);
+
+    /// <remarks>
+    /// columnSize is SQLULEN (8 bytes on x64); bufferLength is in BYTES (the stride of column-wise arrays for
+    /// variable-width C types); indicators are SQLLEN (8 bytes each).
+    /// </remarks>
+    [LibraryImport(Dll)]
+    public static partial short SQLBindParameter(nint statement, ushort parameterNumber, short inputOutputType, short valueType,
+        short parameterType, nuint columnSize, short decimalDigits, void* parameterValue, nint bufferLength, nint* strLenOrInd);
+
+    [LibraryImport(Dll)]
+    public static partial short SQLEndTran(short handleType, nint handle, short completionType);
 
     [LibraryImport(Dll)]
     public static partial short SQLNumResultCols(nint statement, short* columnCount);

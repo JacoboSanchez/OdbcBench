@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using OdbcBench.Fetch;
+using OdbcBench.Insert;
 using OdbcBench.Odbc;
 using OdbcBench.Validation;
 
@@ -12,6 +13,9 @@ public sealed class ConfigException : Exception
 {
     public ConfigException(string message) : base(message) { }
 }
+
+/// <summary>What a run measures: reading the result of a query, or inserting generated rows in batches.</summary>
+public enum Workload { Select, Insert }
 
 public sealed class DsnConfig
 {
@@ -27,6 +31,8 @@ public sealed class DsnConfig
     public string? ExtraAttributes { get; set; }
     /// <summary>Per-DSN query override (dialect differences); null uses the global query.</summary>
     public string? Query { get; set; }
+    /// <summary>Per-DSN target table of the insert benchmark (naming and quoting differences); null uses insert.table.</summary>
+    public string? InsertTable { get; set; }
     public bool Enabled { get; set; } = true;
 
     [JsonIgnore]
@@ -72,6 +78,25 @@ public sealed class ValidationConfig
     public NormalizationOptions Normalization { get; set; } = new();
 }
 
+/// <summary>The insert benchmark: generated rows written to one table with parameter arrays.</summary>
+public sealed class InsertConfig
+{
+    /// <summary>Target table, written as it appears in SQL (qualified and quoted as the DBMS needs).</summary>
+    public string? Table { get; set; }
+    /// <summary>Columns to fill, written as they appear in SQL; null fills every column that accepts a value.</summary>
+    public List<string>? Columns { get; set; }
+    /// <summary>Rows inserted per iteration.</summary>
+    public long Rows { get; set; } = 100_000;
+    /// <summary>Statement run before every iteration, never timed: none, delete or truncate.</summary>
+    public string Cleanup { get; set; } = "none";
+    /// <summary>When the rows are committed: perIteration, perBatch or autocommit.</summary>
+    public string Transaction { get; set; } = "perIteration";
+    /// <summary>Count the rows of the table before and after every iteration (never timed).</summary>
+    public bool Verify { get; set; } = true;
+    /// <summary>Characters or bytes generated for text and binary columns, capped at the column size.</summary>
+    public int ValueLength { get; set; } = 32;
+}
+
 public sealed class OutputConfig
 {
     public string Directory { get; set; } = "results";
@@ -109,6 +134,8 @@ public sealed partial class BenchConfig
     public int LongColumnCapBytes { get; set; } = 65536;
     public long MaxBoundBytes { get; set; } = 256L * 1024 * 1024;
     public int GetDataChunkBytes { get; set; } = 32768;
+    /// <summary>Only needed by the insert benchmark.</summary>
+    public InsertConfig? Insert { get; set; }
     public ValidationConfig Validation { get; set; } = new();
     public OutputConfig Output { get; set; } = new();
 
@@ -179,6 +206,29 @@ public sealed partial class BenchConfig
 
     public string QueryFor(DsnConfig dsn) => string.IsNullOrWhiteSpace(dsn.Query) ? ResolvedQuery : dsn.Query.Trim();
 
+    public string TableFor(DsnConfig dsn) => (string.IsNullOrWhiteSpace(dsn.InsertTable) ? Insert?.Table ?? "" : dsn.InsertTable).Trim();
+
+    [JsonIgnore]
+    public bool HasQuery => !string.IsNullOrWhiteSpace(ResolvedQuery) || EnabledDsns.Any(d => !string.IsNullOrWhiteSpace(d.Query));
+
+    [JsonIgnore]
+    public CleanupMode CleanupModeValue => (Insert?.Cleanup ?? "none").Trim().ToLowerInvariant() switch
+    {
+        "none" => CleanupMode.None,
+        "delete" => CleanupMode.Delete,
+        "truncate" => CleanupMode.Truncate,
+        _ => throw new ConfigException($"insert.cleanup must be 'none', 'delete' or 'truncate', not '{Insert?.Cleanup}'"),
+    };
+
+    [JsonIgnore]
+    public TransactionMode TransactionModeValue => (Insert?.Transaction ?? "perIteration").Trim().ToLowerInvariant() switch
+    {
+        "periteration" => TransactionMode.PerIteration,
+        "perbatch" => TransactionMode.PerBatch,
+        "autocommit" => TransactionMode.Autocommit,
+        _ => throw new ConfigException($"insert.transaction must be 'perIteration', 'perBatch' or 'autocommit', not '{Insert?.Transaction}'"),
+    };
+
     [JsonIgnore]
     public BindMode BindModeValue => BindMode.Trim().ToLowerInvariant() switch
     {
@@ -195,8 +245,8 @@ public sealed partial class BenchConfig
         _ => throw new ConfigException($"longColumnMode must be 'rowByRow' or 'bindCapped', not '{LongColumnMode}'"),
     };
 
-    /// <summary>Returns every problem found; an empty list means the configuration is usable.</summary>
-    public List<string> Validate()
+    /// <summary>Returns every problem found for the given workload; an empty list means the configuration is usable.</summary>
+    public List<string> Validate(Workload workload = Workload.Select)
     {
         var errors = new List<string>();
         var enabled = EnabledDsns.ToList();
@@ -209,8 +259,20 @@ public sealed partial class BenchConfig
             else if (!names.Add(d.Name)) errors.Add($"DSN name '{d.Name}' is used more than once");
             if (string.IsNullOrWhiteSpace(d.Dsn) && string.IsNullOrWhiteSpace(d.ConnectionString))
                 errors.Add($"DSN '{d.Name}': either dsn or connectionString is required");
-            if (d.Enabled && string.IsNullOrWhiteSpace(d.Query) && string.IsNullOrWhiteSpace(ResolvedQuery))
+            if (workload == Workload.Select && d.Enabled && string.IsNullOrWhiteSpace(d.Query) && string.IsNullOrWhiteSpace(ResolvedQuery))
                 errors.Add($"DSN '{d.Name}': no query (set the global query/queryFile or a per-DSN query)");
+            if (workload == Workload.Insert && d.Enabled && TableFor(d).Length == 0)
+                errors.Add($"DSN '{d.Name}': no target table (set insert.table or a per-DSN insertTable)");
+        }
+
+        if (workload == Workload.Insert)
+        {
+            var insert = Insert ?? new InsertConfig();
+            if (insert.Rows < 1) errors.Add("insert.rows must be at least 1");
+            if (insert.Columns != null && insert.Columns.Any(string.IsNullOrWhiteSpace)) errors.Add("insert.columns contains an empty name");
+            if (insert.Cleanup.Trim().ToLowerInvariant() is not ("none" or "delete" or "truncate")) errors.Add($"insert.cleanup must be 'none', 'delete' or 'truncate', not '{insert.Cleanup}'");
+            if (insert.Transaction.Trim().ToLowerInvariant() is not ("periteration" or "perbatch" or "autocommit")) errors.Add($"insert.transaction must be 'perIteration', 'perBatch' or 'autocommit', not '{insert.Transaction}'");
+            if (insert.ValueLength is < 1 or > 4000) errors.Add("insert.valueLength must be between 1 and 4000");
         }
 
         if (Iterations < 1) errors.Add("iterations must be at least 1");
@@ -302,6 +364,22 @@ public sealed partial class BenchConfig
         GetDataChunkBytes = GetDataChunkBytes,
         CacheBuster = CacheBuster,
     };
+
+    public InsertOptions InsertOptions(int batchSize) => new()
+    {
+        BatchSize = batchSize,
+        Rows = Insert?.Rows ?? 100_000,
+        BindMode = BindModeValue,
+        ReuseStatement = ReuseStatement,
+        Transaction = TransactionModeValue,
+        Verify = Insert?.Verify ?? true,
+        MaxBoundBytes = MaxBoundBytes,
+        QueryTimeoutSeconds = QueryTimeoutSeconds,
+    };
+
+    /// <summary>The table one DSN writes to. It is described on first use, through that DSN's connection.</summary>
+    public InsertTarget InsertTargetFor(DsnConfig dsn) =>
+        new(TableFor(dsn), Insert?.Columns?.Select(c => c.Trim()).ToList(), BindModeValue, Insert?.ValueLength ?? 32, CleanupModeValue);
 
     [JsonIgnore]
     public uint OdbcVersionValue => OdbcVersion.Trim() is "3.0" or "3" ? 3u : 380u;

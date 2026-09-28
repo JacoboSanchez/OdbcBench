@@ -150,9 +150,46 @@ public sealed unsafe class OdbcConnection : IDisposable
         return Native.Succeeded(rc) ? value : 0;
     }
 
+    /// <summary>False after <see cref="TrySetManualCommit"/> succeeded: transactions end with <see cref="Commit"/> or <see cref="Rollback"/>.</summary>
+    public bool AutoCommit { get; private set; } = true;
+    /// <summary>Why the driver refused to turn autocommit off; null when it was never refused.</summary>
+    public string? ManualCommitRefusal { get; private set; }
+
+    /// <summary>Turns autocommit off. Returns false, and remembers why, when the driver does not support transactions.</summary>
+    public bool TrySetManualCommit()
+    {
+        if (!AutoCommit) return true;
+        if (ManualCommitRefusal != null) return false;
+        short rc = Native.SQLSetConnectAttrW(Handle, Native.SQL_ATTR_AUTOCOMMIT, (nint)Native.SQL_AUTOCOMMIT_OFF, Native.SQL_IS_UINTEGER);
+        if (Native.Succeeded(rc))
+        {
+            AutoCommit = false;
+            return true;
+        }
+        var diagnostics = Diag.Drain(Native.SQL_HANDLE_DBC, Handle);
+        ManualCommitRefusal = diagnostics.Count > 0 ? $"[{diagnostics[0].SqlState}] {diagnostics[0].Message}" : OdbcException.ReturnCodeName(rc);
+        return false;
+    }
+
+    /// <summary>Raw SQLEndTran(SQL_COMMIT). The caller interprets the return code.</summary>
+    public short EndTransaction(short completionType) => Native.SQLEndTran(Native.SQL_HANDLE_DBC, Handle, completionType);
+
+    public void Commit()
+    {
+        short rc = EndTransaction(Native.SQL_COMMIT);
+        Diag.Check(rc, "SQLEndTran(SQL_COMMIT)", Native.SQL_HANDLE_DBC, Handle, Info);
+    }
+
+    /// <summary>Best-effort rollback used on error paths and before disconnecting; never throws.</summary>
+    public void TryRollback()
+    {
+        if (Handle != Native.SQL_NULL_HANDLE && IsConnected && !AutoCommit) EndTransaction(Native.SQL_ROLLBACK);
+    }
+
     public void Disconnect()
     {
         if (!IsConnected) return;
+        TryRollback(); // SQLDisconnect fails with 25000 while a transaction is open
         short rc = Native.SQLDisconnect(Handle);
         IsConnected = false;
         Diag.Check(rc, "SQLDisconnect", Native.SQL_HANDLE_DBC, Handle, Info);
@@ -163,6 +200,7 @@ public sealed unsafe class OdbcConnection : IDisposable
         if (Handle == Native.SQL_NULL_HANDLE) return;
         if (IsConnected)
         {
+            TryRollback();
             Native.SQLDisconnect(Handle);
             IsConnected = false;
         }
