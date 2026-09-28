@@ -486,3 +486,4 @@ $RECYCLE.BIN/
 # OdbcBench run output and local publish folder
 results/
 publish/
+bench.json

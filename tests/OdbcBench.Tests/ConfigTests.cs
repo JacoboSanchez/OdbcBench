@@ -166,6 +166,64 @@ public class ConfigTests
     }
 
     [Fact]
+    public void Insert_workload_needs_a_table_not_a_query()
+    {
+        var c = BenchConfig.Parse("""
+            { "dsns": [ { "name": "a", "dsn": "A" }, { "name": "b", "dsn": "B", "insertTable": "\"b\".\"t\"" } ],
+              "insert": { "table": "dbo.t" } }
+            """);
+        c.ResolveQuery(null);
+        Assert.Empty(c.Validate(Workload.Insert));
+        Assert.Contains(c.Validate(Workload.Select), e => e.Contains("no query"));
+        Assert.Equal("dbo.t", c.TableFor(c.Dsns[0]));
+        Assert.Equal("\"b\".\"t\"", c.TableFor(c.Dsns[1]));
+    }
+
+    [Fact]
+    public void Invalid_insert_settings_are_all_reported()
+    {
+        var c = BenchConfig.Parse("""
+            { "dsns": [ { "name": "a", "dsn": "A" } ],
+              "insert": { "rows": 0, "cleanup": "drop", "transaction": "never", "valueLength": 0, "columns": [ "id", " " ] } }
+            """);
+        var errors = c.Validate(Workload.Insert);
+        Assert.Contains(errors, e => e.Contains("no target table"));
+        Assert.Contains(errors, e => e.Contains("insert.rows"));
+        Assert.Contains(errors, e => e.Contains("insert.cleanup"));
+        Assert.Contains(errors, e => e.Contains("insert.transaction"));
+        Assert.Contains(errors, e => e.Contains("insert.valueLength"));
+        Assert.Contains(errors, e => e.Contains("empty name"));
+    }
+
+    [Fact]
+    public void Insert_options_follow_the_configuration()
+    {
+        var c = BenchConfig.Parse("""
+            { "dsns": [ { "name": "a", "dsn": "A" } ], "bindMode": "wchar", "reuseStatement": false,
+              "insert": { "table": "t", "rows": 5000, "transaction": "perBatch", "cleanup": "truncate", "verify": false } }
+            """);
+        var o = c.InsertOptions(250);
+        Assert.Equal(250, o.BatchSize);
+        Assert.Equal(5000, o.Rows);
+        Assert.Equal(OdbcBench.Insert.TransactionMode.PerBatch, o.Transaction);
+        Assert.Equal(OdbcBench.Odbc.BindMode.WChar, o.BindMode);
+        Assert.False(o.ReuseStatement);
+        Assert.False(o.Verify);
+        Assert.Equal("TRUNCATE TABLE t", c.InsertTargetFor(c.Dsns[0]).CleanupSql);
+    }
+
+    [Fact]
+    public void Insert_defaults()
+    {
+        var c = BenchConfig.Parse("""{ "dsns": [ { "name": "a", "dsn": "A" } ], "insert": { "table": "t" } }""");
+        var o = c.InsertOptions(1000);
+        Assert.Equal(100_000, o.Rows);
+        Assert.Equal(OdbcBench.Insert.TransactionMode.PerIteration, o.Transaction);
+        Assert.True(o.Verify);
+        Assert.Null(c.InsertTargetFor(c.Dsns[0]).CleanupSql);
+    }
+
+    [Fact]
     public void Fetch_options_follow_the_configuration()
     {
         var c = BenchConfig.Parse("""

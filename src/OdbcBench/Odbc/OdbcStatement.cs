@@ -55,6 +55,27 @@ public sealed unsafe class OdbcStatement : IDisposable
         return Diag.Check(rc, "SQLExecDirectW", Native.SQL_HANDLE_STMT, Handle, Info);
     }
 
+    /// <summary>Prepares the statement text for repeated SQLExecute calls.</summary>
+    public void Prepare(string sql)
+    {
+        short rc;
+        fixed (char* text = sql)
+        {
+            rc = Native.SQLPrepareW(Handle, text, Native.SQL_NTS);
+        }
+        Diag.Check(rc, "SQLPrepareW", Native.SQL_HANDLE_STMT, Handle, Info);
+    }
+
+    /// <summary>Raw SQLExecute of the prepared statement. The caller interprets the return code.</summary>
+    public short Execute() => Native.SQLExecute(Handle);
+
+    /// <summary>Binds one input parameter to a column-wise array: <paramref name="elementBytes"/> is the stride of the array.</summary>
+    public void BindParameter(int ordinal, short cType, short sqlType, nuint columnSize, short decimalDigits, void* buffer, nint elementBytes, nint* indicators)
+    {
+        short rc = Native.SQLBindParameter(Handle, (ushort)ordinal, Native.SQL_PARAM_INPUT, cType, sqlType, columnSize, decimalDigits, buffer, elementBytes, indicators);
+        Diag.Check(rc, $"SQLBindParameter(parameter {ordinal})", Native.SQL_HANDLE_STMT, Handle, Info);
+    }
+
     public short NumResultCols()
     {
         short count;
@@ -91,7 +112,7 @@ public sealed unsafe class OdbcStatement : IDisposable
     }
 
     /// <summary>Numeric column attribute; -1 when the driver does not provide it.</summary>
-    private long NumericAttribute(int ordinal, ushort field)
+    public long NumericAttribute(int ordinal, ushort field)
     {
         nint value = 0;
         short stringLength;
@@ -146,6 +167,12 @@ public sealed unsafe class OdbcStatement : IDisposable
     {
         short rc = Native.SQLFreeStmt(Handle, Native.SQL_UNBIND);
         Diag.Check(rc, "SQLFreeStmt(SQL_UNBIND)", Native.SQL_HANDLE_STMT, Handle, Info);
+    }
+
+    public void ResetParameters()
+    {
+        short rc = Native.SQLFreeStmt(Handle, Native.SQL_RESET_PARAMS);
+        Diag.Check(rc, "SQLFreeStmt(SQL_RESET_PARAMS)", Native.SQL_HANDLE_STMT, Handle, Info);
     }
 
     /// <summary>Raw SQLMoreResults: SQL_SUCCESS[_WITH_INFO] means another result set exists, SQL_NO_DATA means none.</summary>

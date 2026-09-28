@@ -114,18 +114,7 @@ public class AnalysisAndReportTests
     }
 
     [Fact]
-    public void Markdown_tables_are_well_formed()
-    {
-        string md = MarkdownReportWriter.Render(SampleRun.Create());
-        var lines = md.Split('\n');
-        for (int i = 0; i < lines.Length; i++)
-        {
-            if (!lines[i].StartsWith("| ") || i + 1 >= lines.Length || !lines[i + 1].StartsWith("| ---")) continue;
-            int columns = CountCells(lines[i]);
-            for (int j = i + 1; j < lines.Length && lines[j].StartsWith("|"); j++)
-                Assert.True(columns == CountCells(lines[j]), $"line {j + 1} has {CountCells(lines[j])} cells, header has {columns}: {lines[j]}");
-        }
-    }
+    public void Markdown_tables_are_well_formed() => AssertTablesWellFormed(MarkdownReportWriter.Render(SampleRun.Create()));
 
     [Fact]
     public void Json_round_trip_renders_the_same_report()
@@ -145,10 +134,96 @@ public class AnalysisAndReportTests
     }
 
     [Fact]
-    public void Markdown_matches_the_golden_file()
+    public void Markdown_matches_the_golden_file() => AssertGolden("report.md", MarkdownReportWriter.Render(SampleRun.Create()));
+
+    // ---- insert workload
+
+    [Fact]
+    public void Insert_consistency_catches_rows_missing_from_the_table()
     {
-        string actual = MarkdownReportWriter.Render(SampleRun.Create());
-        string golden = Path.Combine(SourceDirectory(), "Golden", "report.md");
+        var run = SampleInsertRun.Create();
+        Assert.True(run.Consistency.RowCountsMatch);
+        Assert.True(run.Consistency.RowsAccepted);
+        Assert.False(run.Consistency.TableRowsMatch);
+        Assert.Equal(4 * (1 + SampleInsertRun.Iterations), run.Consistency.TableChecks);
+        Assert.Contains(run.Consistency.Notes, n => n.Contains("vendor @1") && n.Contains("9,999"));
+        Assert.Equal(1, run.ExitCode);
+
+        run.Series[3].Samples[2].VerifiedRows = SampleInsertRun.Rows;
+        Analysis.Summarize(run, SampleInsertRun.Iterations);
+        Assert.True(run.Consistency.TableRowsMatch);
+        Assert.Equal(0, run.ExitCode);
+    }
+
+    [Fact]
+    public void Insert_consistency_catches_refused_rows()
+    {
+        var run = SampleInsertRun.Create();
+        run.Series[0].Samples[3].Rows = SampleInsertRun.Rows - 10;
+        run.Series[0].Samples[3].VerifiedRows = SampleInsertRun.Rows - 10;
+        Analysis.Summarize(run, SampleInsertRun.Iterations);
+        Assert.False(run.Consistency.RowsAccepted);
+        Assert.Contains(run.Consistency.Notes, n => n.Contains("psql @1000") && n.Contains("9,990 of the 10,000"));
+    }
+
+    [Fact]
+    public void Insert_statistics_include_commit_and_generate()
+    {
+        var run = SampleInsertRun.Create();
+        var s = run.Series[0];
+        Assert.NotNull(s.Commit);
+        Assert.Equal(2.5, s.Generate!.P50);
+        Assert.Equal(1000, s.EffectiveBlockSize);
+        Assert.Equal(1, run.Series[1].EffectiveBlockSize);
+    }
+
+    [Fact]
+    public void Insert_markdown_contains_every_section()
+    {
+        string md = MarkdownReportWriter.Render(SampleInsertRun.Create());
+        foreach (var heading in new[]
+                 {
+                     "# ODBC driver batch insert comparison", "## Summary", "## Environment", "## Insert statement",
+                     "## Validation (first 10 rows)", "## Parameter bindings", "## Results: batch size 1,000", "## Results: batch size 1",
+                     "### Where the time goes (p50, ms)", "## Data consistency", "## Appendix: every iteration",
+                 })
+            Assert.Contains(heading + "\n", md);
+
+        Assert.Contains("**TABLE ROW COUNT DIFFERS**", md);
+        Assert.Contains("| Batch 1,000 |", md);
+        Assert.Contains("SQL\\_ATTR\\_PARAMSET\\_SIZE", md);
+        Assert.DoesNotContain("## Query\n", md);
+        Assert.DoesNotContain("### Harness overhead", md);
+        Assert.DoesNotContain("token=abc", md);
+    }
+
+    [Fact]
+    public void Insert_markdown_tables_are_well_formed() => AssertTablesWellFormed(MarkdownReportWriter.Render(SampleInsertRun.Create()));
+
+    [Fact]
+    public void Insert_json_round_trip_renders_the_same_report()
+    {
+        var run = SampleInsertRun.Create();
+        var back = System.Text.Json.JsonSerializer.Deserialize<RunResult>(JsonResultWriter.Serialize(run), JsonResultWriter.Options)!;
+        Assert.Equal(OdbcBench.Config.Workload.Insert, back.Workload);
+        Assert.Equal(MarkdownReportWriter.Render(run), MarkdownReportWriter.Render(back));
+    }
+
+    [Fact]
+    public void Results_without_a_workload_are_read_as_select()
+    {
+        string json = JsonResultWriter.Serialize(SampleRun.Create()).Replace("\"workload\": \"select\",", "");
+        Assert.DoesNotContain("\"workload\"", json);
+        var back = System.Text.Json.JsonSerializer.Deserialize<RunResult>(json, JsonResultWriter.Options)!;
+        Assert.Equal(OdbcBench.Config.Workload.Select, back.Workload);
+    }
+
+    [Fact]
+    public void Insert_markdown_matches_the_golden_file() => AssertGolden("insert-report.md", MarkdownReportWriter.Render(SampleInsertRun.Create()));
+
+    private static void AssertGolden(string name, string actual)
+    {
+        string golden = Path.Combine(SourceDirectory(), "Golden", name);
         if (Environment.GetEnvironmentVariable("UPDATE_GOLDEN") == "1")
         {
             Directory.CreateDirectory(Path.GetDirectoryName(golden)!);
@@ -156,6 +231,18 @@ public class AnalysisAndReportTests
         }
         Assert.True(File.Exists(golden), $"golden file missing: run the tests once with UPDATE_GOLDEN=1, review {golden}, then commit it");
         Assert.Equal(File.ReadAllText(golden).Replace("\r\n", "\n"), actual);
+    }
+
+    private static void AssertTablesWellFormed(string md)
+    {
+        var lines = md.Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].StartsWith("| ") || i + 1 >= lines.Length || !lines[i + 1].StartsWith("| ---")) continue;
+            int columns = CountCells(lines[i]);
+            for (int j = i + 1; j < lines.Length && lines[j].StartsWith("|"); j++)
+                Assert.True(columns == CountCells(lines[j]), $"line {j + 1} has {CountCells(lines[j])} cells, header has {columns}: {lines[j]}");
+        }
     }
 
     private static int CountCells(string line)

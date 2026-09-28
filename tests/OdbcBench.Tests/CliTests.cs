@@ -70,6 +70,28 @@ public class CliTests
     }
 
     [Fact]
+    public void Insert_options_are_parsed_and_applied()
+    {
+        var o = CliOptions.Parse(new[] { "insert", "-c", "b.json", "--batch-size", "1,500", "--rows", "25000", "--table", "dbo.x" });
+        Assert.Equal("insert", o.Command);
+        Assert.Equal(new[] { 1, 500 }, o.BlockSizes);
+
+        var config = BenchConfig.Parse("""{ "dsns": [ { "name": "a", "dsn": "A", "insertTable": "a.t" } ] }""");
+        o.ApplyTo(config);
+        Assert.Equal(25000, config.Insert!.Rows);
+        Assert.Equal("dbo.x", config.TableFor(config.Dsns[0])); // the command line wins over the per-DSN table
+        Assert.Empty(config.Validate(Workload.Insert));
+    }
+
+    [Theory]
+    [InlineData("--rows", "0")]
+    [InlineData("--rows", "many")]
+    public void Bad_row_counts_are_rejected(string option, string value)
+    {
+        Assert.Throws<CliException>(() => CliOptions.Parse(new[] { "insert", option, value }));
+    }
+
+    [Fact]
     public void Unknown_dsn_filter_is_rejected()
     {
         var config = BenchConfig.Parse("""{ "query": "SELECT 1", "dsns": [ { "name": "a", "dsn": "A" } ] }""");

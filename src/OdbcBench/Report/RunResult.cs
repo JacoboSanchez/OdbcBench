@@ -23,9 +23,12 @@ public sealed class RunResult
     public string Outcome { get; set; } = "";
     public int ExitCode { get; set; }
     public string BaselineDsn { get; set; } = "";
+    /// <summary>What was measured: the query (results without this field) or the batch insert.</summary>
+    public Workload Workload { get; set; } = Workload.Select;
     public EnvironmentInfo Environment { get; set; } = new();
     /// <summary>The configuration with passwords and secrets redacted, after command-line overrides.</summary>
     public BenchConfig Config { get; set; } = new();
+    /// <summary>The query; for the insert benchmark, the INSERT statement of the baseline DSN.</summary>
     public string Query { get; set; } = "";
     public List<DsnResult> Dsns { get; set; } = new();
     public ValidationResult? Validation { get; set; }
@@ -119,12 +122,18 @@ public sealed class SeriesResult
     public SeriesStats? FirstBatch { get; set; }
     public SeriesStats? Fetch { get; set; }
     public SeriesStats? Close { get; set; }
+    /// <summary>Insert benchmark only.</summary>
+    public SeriesStats? Commit { get; set; }
+    /// <summary>Insert benchmark only: generating the values, which is not part of the total.</summary>
+    public SeriesStats? Generate { get; set; }
     public SeriesStats? Connect { get; set; }
     public SeriesStats? Cpu { get; set; }
     public double RowsPerSecond { get; set; }
     public double MegabytesPerSecond { get; set; }
     public double CpuPercent { get; set; }
     public long Truncations { get; set; }
+    /// <summary>Most rows the driver rejected in one iteration.</summary>
+    public long RowErrors { get; set; }
     public int GcCollections { get; set; }
     public long AllocatedBytes { get; set; }
     public bool Noisy { get; set; }
@@ -145,6 +154,12 @@ public sealed class ConsistencyResult
     public bool ChecksumsStable { get; set; } = true;
     public bool BlockSizeChecksumsEqual { get; set; } = true;
     public bool CrossDsnChecksumsEqual { get; set; } = true;
+    /// <summary>Insert benchmark: the driver accepted every row it was sent.</summary>
+    public bool RowsAccepted { get; set; } = true;
+    /// <summary>Insert benchmark: the table gained exactly the rows the driver accepted, in every iteration that was checked.</summary>
+    public bool TableRowsMatch { get; set; } = true;
+    /// <summary>Insert benchmark: iterations whose table row count was checked.</summary>
+    public int TableChecks { get; set; }
     public List<string> Notes { get; set; } = new();
 }
 

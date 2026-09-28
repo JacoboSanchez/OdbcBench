@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Runtime;
 using OdbcBench.Config;
 using OdbcBench.Fetch;
+using OdbcBench.Insert;
 using OdbcBench.Odbc;
 using OdbcBench.Report;
 using OdbcBench.Validation;
@@ -11,6 +12,7 @@ namespace OdbcBench.Bench;
 
 public sealed class RunOptions
 {
+    public Workload Workload { get; init; } = Workload.Select;
     public bool Strict { get; init; }
     public bool Validate { get; init; } = true;
     public bool Quiet { get; init; }
@@ -22,6 +24,7 @@ public sealed class RunOptions
 /// <summary>
 /// Runs the three phases: connect every DSN, validate the first rows, then benchmark every (DSN, block size) series with
 /// warmup and measured iterations. Never throws for DSN-level problems: they are recorded and the other DSNs continue.
+/// The workload decides what a series does: read the result of the query, or insert generated rows in batches.
 /// </summary>
 public sealed class BenchmarkRunner
 {
@@ -33,6 +36,8 @@ public sealed class BenchmarkRunner
         public required DsnResult Result { get; init; }
         public required string Query { get; init; }
         public required string ConnectionString { get; init; }
+        /// <summary>Insert benchmark only: the table this DSN writes to.</summary>
+        public InsertTarget? Target { get; init; }
         public OdbcConnection? Connection { get; set; }
         public bool ReconnectUsed { get; set; }
     }
@@ -42,8 +47,7 @@ public sealed class BenchmarkRunner
         public required DsnState Dsn { get; init; }
         public required int BlockSize { get; init; }
         public required SeriesResult Result { get; init; }
-        public required BlockFetchOptions Options { get; init; }
-        public BlockFetchReader? Reader { get; set; }
+        public IResultReader? Reader { get; set; }
         public int ConsecutiveErrors { get; set; }
         public int Messages { get; set; }
         public bool Stopped { get; set; }
@@ -56,6 +60,7 @@ public sealed class BenchmarkRunner
     private readonly RunResult _run = new();
     private readonly List<DsnState> _dsns = new();
     private readonly List<SeriesState> _series = new();
+    private readonly bool _insert;
     private OdbcEnvironment? _environment;
 
     public BenchmarkRunner(BenchConfig config, RunOptions options, TextWriter log, CancellationToken cancel)
@@ -64,6 +69,7 @@ public sealed class BenchmarkRunner
         _options = options;
         _log = log;
         _cancel = cancel;
+        _insert = options.Workload == Workload.Insert;
     }
 
     public RunResult Run()
@@ -75,6 +81,7 @@ public sealed class BenchmarkRunner
         _run.ConfigPath = _options.ConfigPath;
         _run.ConfigSha256 = _options.ConfigSha256;
         _run.CommandLine = _options.CommandLine;
+        _run.Workload = _options.Workload;
         _run.Config = _config.Redacted();
         _run.Query = _config.ResolvedQuery;
         _run.Environment = SystemInfo.Collect();
@@ -93,9 +100,13 @@ public sealed class BenchmarkRunner
                 ResolveBaseline(connected);
                 CreateSeries(connected);
                 if (_config.WarmupIterations == 0 && !_options.Validate)
-                    Message("setup", "warn", "no warmup and no validation dry run: the first measured iteration of each series includes describe and bind and any first-execution cost");
+                    Message("setup", "warn", $"no warmup and no validation dry run: the first measured iteration of each series includes {(_insert ? "prepare" : "describe")} and bind and any first-execution cost");
 
-                if (_options.Validate) Validate(connected);
+                if (_options.Validate)
+                {
+                    if (_insert) ValidateInsert(connected);
+                    else Validate(connected);
+                }
 
                 if (_run.Validation?.StrictAbort != true && !_cancel.IsCancellationRequested)
                 {
@@ -130,6 +141,7 @@ public sealed class BenchmarkRunner
             _environment = null;
         }
 
+        if (_insert) RecordInsertStatements();
         _run.Interrupted = _cancel.IsCancellationRequested;
         Analysis.Summarize(_run, _config.Iterations);
         _run.FinishedUtc = DateTime.UtcNow;
@@ -147,10 +159,14 @@ public sealed class BenchmarkRunner
             {
                 Name = cfg.Name,
                 Source = cfg.Source,
-                QueryOverridden = !string.IsNullOrWhiteSpace(cfg.Query),
-                Query = string.IsNullOrWhiteSpace(cfg.Query) ? null : cfg.Query.Trim(),
+                QueryOverridden = !_insert && !string.IsNullOrWhiteSpace(cfg.Query),
+                Query = _insert || string.IsNullOrWhiteSpace(cfg.Query) ? null : cfg.Query.Trim(),
             };
-            var state = new DsnState { Config = cfg, Result = result, Query = _config.QueryFor(cfg), ConnectionString = cfg.BuildConnectionString() };
+            var state = new DsnState
+            {
+                Config = cfg, Result = result, Query = _config.QueryFor(cfg), ConnectionString = cfg.BuildConnectionString(),
+                Target = _insert ? _config.InsertTargetFor(cfg) : null,
+            };
             _run.Dsns.Add(result);
             _dsns.Add(state);
 
@@ -224,18 +240,43 @@ public sealed class BenchmarkRunner
         {
             foreach (var d in connected)
             {
-                var options = _config.FetchOptions(blockSize);
+                string description = _insert
+                    ? BatchInsertWriter.Describe(_config.InsertOptions(blockSize))
+                    : BlockFetchReader.Describe(_config.FetchOptions(blockSize));
                 var result = new SeriesResult
                 {
                     DsnName = d.Config.Name,
                     BlockSize = blockSize,
-                    Description = BlockFetchReader.Describe(options) + (_config.ConnectionPerIteration ? ", new connection every iteration" : ""),
+                    Description = description + (_config.ConnectionPerIteration ? ", new connection every iteration" : ""),
                 };
-                var state = new SeriesState { Dsn = d, BlockSize = blockSize, Result = result, Options = options };
-                if (!_config.ConnectionPerIteration) state.Reader = new BlockFetchReader(d.Connection!, d.Query, options);
+                var state = new SeriesState { Dsn = d, BlockSize = blockSize, Result = result };
+                if (!_config.ConnectionPerIteration) state.Reader = CreateReader(d, d.Connection!, blockSize);
                 _series.Add(state);
                 _run.Series.Add(result);
             }
+        }
+    }
+
+    /// <summary>The access path of the workload, on the given connection of the DSN.</summary>
+    private IResultReader CreateReader(DsnState d, OdbcConnection connection, int blockSize) => _insert
+        ? new BatchInsertWriter(connection, d.Target!, _config.InsertOptions(blockSize))
+        : new BlockFetchReader(connection, d.Query, _config.FetchOptions(blockSize));
+
+    /// <summary>
+    /// Insert benchmark: the statements are only known once the tables were described, so they are recorded at the
+    /// end. The report shows the baseline's statement and every statement that differs from it.
+    /// </summary>
+    private void RecordInsertStatements()
+    {
+        var targets = _dsns.Where(d => d.Target != null).ToList();
+        if (targets.Count == 0) return;
+        var shown = targets.FirstOrDefault(d => string.Equals(d.Config.Name, _run.BaselineDsn, StringComparison.OrdinalIgnoreCase)) ?? targets[0];
+        _run.Query = shown.Target!.InsertSqlOrOutline;
+        foreach (var d in targets)
+        {
+            string sql = d.Target!.InsertSqlOrOutline;
+            d.Result.QueryOverridden = sql != _run.Query;
+            d.Result.Query = d.Result.QueryOverridden ? sql : null;
         }
     }
 
@@ -277,6 +318,64 @@ public sealed class BenchmarkRunner
                 validation.Issues.Add(new ValidationIssue(Severity.Warn,
                     $"dry run {s.Result.Key}: {sample.Truncations} value(s) truncated in the first row array: the driver reports column sizes smaller than the data (raise longColumnThresholdBytes, or use bindMode wchar)"));
         }
+
+        validation.StrictAbort = _options.Strict && validation.Status == "FAIL";
+        _run.Validation = validation;
+        Log($"  validation: {validation.Status} ({validation.FailCount} fail, {validation.WarnCount} warn)");
+        if (validation.StrictAbort) Log("  strict mode: stopping before the benchmark");
+    }
+
+    /// <summary>
+    /// Insert benchmark: every series writes the first rows in a dry run through the real batch path, which surfaces
+    /// rejected bindings and parameter array size changes before any timing starts (and absorbs prepare + bind).
+    /// When the table is emptied before every iteration, the rows each DSN wrote last are read back through that DSN
+    /// and compared with the values that were sent.
+    /// </summary>
+    private void ValidateInsert(List<DsnState> connected)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        int rows = (int)Math.Min(_config.Validation.Rows, _config.Insert?.Rows ?? _config.Validation.Rows);
+        bool readBack = _config.CleanupModeValue != CleanupMode.None;
+        Phase($"Validating (writing the first {rows} rows{(readBack ? " and reading them back" : "")})");
+
+        var issues = new List<ValidationIssue>();
+        var samples = new List<SampleResult>();
+        foreach (var d in connected)
+        {
+            bool written = false;
+            foreach (var s in _series.Where(x => ReferenceEquals(x.Dsn, d)))
+            {
+                if (_cancel.IsCancellationRequested) return;
+                var sample = ExecuteOnce(s, -1, warmup: true, rowLimit: rows);
+                if (s.Reader != null) CaptureReaderInfo(s, s.Reader);
+                MergeSampleWarnings(s, sample);
+                written = sample.Ok;
+                if (!sample.Ok)
+                    issues.Add(new ValidationIssue(Severity.Fail, $"dry run {s.Result.Key} failed: {sample.ErrorMessage}"));
+                else if (sample.Rows != rows)
+                    issues.Add(new ValidationIssue(Severity.Fail, string.Create(inv, $"dry run {s.Result.Key}: the driver accepted {sample.Rows:N0} of the {rows:N0} rows it was sent")));
+                else if (sample.VerifiedRows is long gained && gained != rows)
+                    issues.Add(new ValidationIssue(Severity.Fail, string.Create(inv, $"dry run {s.Result.Key}: the driver accepted {rows:N0} rows but the table gained {gained:N0}")));
+            }
+
+            // Only the rows of the DSN's last dry run are in the table, and only when that one succeeded.
+            if (!readBack || !written || d.Target is not { Resolved: true } target) continue;
+            if (samples.Count == 0) samples.Add(target.SentSample(rows));
+            var back = SampleReader.Read(d.Connection!, d.Config.Name, target.ReadBackSql, rows, _config.QueryTimeoutSeconds);
+            d.Connection!.TryRollback(); // the SELECT opened a transaction when autocommit is off
+            samples.Add(back);
+            foreach (var info in back.Info) Message("validation", "info", info, d.Config.Name);
+            Log(back.Ok
+                ? $"  {d.Config.Name}: {back.Rows.Count} rows x {back.Columns.Count} columns read back"
+                : $"  {d.Config.Name}: read back FAILED {back.Error}");
+        }
+
+        var queries = connected.Where(d => d.Target is { Resolved: true }).Select(d => d.Target!.ReadBackSql).Distinct().ToList();
+        var validation = ResultComparer.Compare(samples, samples.Count > 0 ? queries : new List<string>(), _config.Validation.Normalization);
+        validation.Issues.AddRange(issues);
+        if (!readBack)
+            validation.Issues.Add(new ValidationIssue(Severity.Info,
+                "the rows were not read back: with insert.cleanup 'none' the table also holds the rows of other iterations, so its first rows are not the rows of one DSN"));
 
         validation.StrictAbort = _options.Strict && validation.Status == "FAIL";
         _run.Validation = validation;
@@ -375,8 +474,9 @@ public sealed class BenchmarkRunner
     }
 
     /// <summary>
-    /// Executes one iteration. CPU and GC are measured around execute-fetch-close only. In connection-per-iteration mode
-    /// the connect is timed separately and the disconnect is not timed.
+    /// Executes one iteration. CPU and GC are measured around execute-fetch-close only (insert: around filling and
+    /// executing the parameter arrays and the commit). In connection-per-iteration mode the connect is timed separately
+    /// and the disconnect is not timed.
     /// </summary>
     private IterationSample ExecuteOnce(SeriesState s, int index, bool warmup, long? rowLimit)
     {
@@ -402,7 +502,7 @@ public sealed class BenchmarkRunner
         try
         {
             connection.UseDriverInfo(s.Dsn.Result.Driver);
-            using var reader = new BlockFetchReader(connection, s.Dsn.Query, s.Options);
+            using var reader = CreateReader(s.Dsn, connection, s.BlockSize);
             var sample = Measure(reader, index, warmup, rowLimit);
             sample.ConnectMs = connectMs;
             CaptureReaderInfo(s, reader);
@@ -414,8 +514,10 @@ public sealed class BenchmarkRunner
         }
     }
 
-    private static IterationSample Measure(BlockFetchReader reader, int index, bool warmup, long? rowLimit)
+    private static IterationSample Measure(IResultReader reader, int index, bool warmup, long? rowLimit)
     {
+        if (reader.Prepare(index, warmup) is { } failed) return failed;
+
         int gc0 = GC.CollectionCount(0), gc1 = GC.CollectionCount(1), gc2 = GC.CollectionCount(2);
         double cpu0 = ProcessCpu.NowMs();
         var sample = reader.Execute(index, warmup, rowLimit);
@@ -423,6 +525,8 @@ public sealed class BenchmarkRunner
         sample.Gc0 = GC.CollectionCount(0) - gc0;
         sample.Gc1 = GC.CollectionCount(1) - gc1;
         sample.Gc2 = GC.CollectionCount(2) - gc2;
+
+        reader.Verify(sample);
         return sample;
     }
 
@@ -451,8 +555,8 @@ public sealed class BenchmarkRunner
         {
             d.Connection = OdbcConnection.Open(_environment!, d.ConnectionString, _config.LoginTimeoutSeconds, readDriverInfo: false);
             d.Connection.UseDriverInfo(d.Result.Driver);
-            foreach (var s in affected) s.Reader = new BlockFetchReader(d.Connection, d.Query, s.Options);
-            Message("benchmark", "warn", "connection lost; reconnected once (the next iteration of each series repeats describe and bind)", d.Config.Name);
+            foreach (var s in affected) s.Reader = CreateReader(d, d.Connection, s.BlockSize);
+            Message("benchmark", "warn", $"connection lost; reconnected once (the next iteration of each series repeats {(_insert ? "prepare" : "describe")} and bind)", d.Config.Name);
             Log($"  {d.Config.Name}: connection lost, reconnected");
         }
         catch (OdbcException ex)

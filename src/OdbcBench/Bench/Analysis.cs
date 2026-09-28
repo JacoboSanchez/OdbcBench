@@ -1,4 +1,5 @@
 using System.Globalization;
+using OdbcBench.Config;
 using OdbcBench.Fetch;
 using OdbcBench.Report;
 
@@ -47,6 +48,8 @@ public static class Analysis
         s.Close = SeriesStats.From(ok.Select(x => x.CloseMs).ToList(), indices);
         s.Cpu = SeriesStats.From(ok.Select(x => x.CpuMs).ToList(), indices);
         s.Describe = ok.Any(x => x.DescribeMs > 0) ? SeriesStats.From(ok.Select(x => x.DescribeMs).ToList(), indices) : null;
+        s.Commit = ok.Any(x => x.CommitMs > 0) ? SeriesStats.From(ok.Select(x => x.CommitMs).ToList(), indices) : null;
+        s.Generate = ok.Any(x => x.GenerateMs > 0) ? SeriesStats.From(ok.Select(x => x.GenerateMs).ToList(), indices) : null;
         s.Connect = ok.Any(x => x.ConnectMs > 0) ? SeriesStats.From(ok.Select(x => x.ConnectMs).ToList(), indices) : null;
 
         s.Rows = (long)Median(ok.Select(x => (double)x.Rows));
@@ -56,6 +59,7 @@ public static class Analysis
         s.MegabytesPerSecond = Median(ok.Select(x => x.TotalMs > 0 ? x.Bytes / 1e6 / (x.TotalMs / 1000.0) : 0));
         s.CpuPercent = Median(ok.Select(x => x.TotalMs > 0 ? x.CpuMs / x.TotalMs * 100 : 0));
         s.Truncations = ok.Max(x => x.Truncations);
+        s.RowErrors = ok.Max(x => x.RowErrors);
         s.GcCollections = ok.Sum(x => x.Gc0 + x.Gc1 + x.Gc2);
         s.AllocatedBytes = ok.Max(x => x.AllocatedBytes);
         s.Noisy = s.Total!.Count >= 3 && s.Total.Cv > NoisyCvPercent;
@@ -137,7 +141,38 @@ public static class Analysis
             if (sums > 1) c.CrossDsnChecksumsEqual = false;
         }
 
+        if (run.Workload == Workload.Insert) CheckInsertedRows(run, c, withData);
+
         run.Consistency = c;
+    }
+
+    /// <summary>
+    /// Insert benchmark: the driver must accept every row it is sent, and the table must gain exactly those rows.
+    /// The second check is what catches a driver that reports success without writing the whole parameter array.
+    /// </summary>
+    private static void CheckInsertedRows(RunResult run, ConsistencyResult c, List<SeriesResult> withData)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        long expected = run.Config.Insert?.Rows ?? 0;
+        foreach (var s in withData)
+        {
+            var ok = s.Samples.Where(x => x.Ok).ToList();
+            var refused = ok.Where(x => x.Rows != expected).ToList();
+            if (refused.Count > 0)
+            {
+                c.RowsAccepted = false;
+                c.Notes.Add(string.Create(inv, $"{s.Key}: the driver accepted {refused[0].Rows:N0} of the {expected:N0} rows it was sent ({refused.Count} of {ok.Count} iterations)"));
+            }
+
+            var counted = ok.Where(x => x.VerifiedRows != null).ToList();
+            c.TableChecks += counted.Count;
+            var wrong = counted.Where(x => x.VerifiedRows != x.Rows).ToList();
+            if (wrong.Count > 0)
+            {
+                c.TableRowsMatch = false;
+                c.Notes.Add(string.Create(inv, $"{s.Key}: the table gained {wrong[0].VerifiedRows:N0} rows where the driver accepted {wrong[0].Rows:N0} ({wrong.Count} of {counted.Count} counted iterations)"));
+            }
+        }
     }
 
     public static void ComputeOutcome(RunResult run)
@@ -148,6 +183,8 @@ public static class Analysis
             run.Dsns.Any(d => d.Status != "connected") ||
             run.Series.Any(s => s.Status != "ok") ||
             !run.Consistency.RowCountsMatch ||
+            !run.Consistency.RowsAccepted ||
+            !run.Consistency.TableRowsMatch ||
             run.Validation?.Status == "FAIL";
 
         if (run.Fatal)
