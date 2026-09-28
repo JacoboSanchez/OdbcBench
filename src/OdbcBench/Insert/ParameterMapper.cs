@@ -14,6 +14,11 @@ public sealed class InsertColumn
     public ValueKind Kind { get; init; }
     /// <summary>Sent as UTF-16 text (SQL_C_WCHAR) that the driver converts, instead of the C type of its kind.</summary>
     public bool AsText { get; internal set; }
+    /// <summary>
+    /// A boolean the driver describes as text: its text form is true/false, which the server casts. Denodo's
+    /// single-row INSERT, for one, rejects '1' for a boolean column.
+    /// </summary>
+    public bool BoolWords { get; init; }
     /// <summary>Characters (text) or bytes (binary) of every generated value.</summary>
     public int Length { get; init; }
     /// <summary>Integers: values are the row number modulo this; 0 means the row number itself.</summary>
@@ -31,7 +36,7 @@ public sealed class InsertColumn
         ValueKind.Integer => 19,
         ValueKind.Float => 24,
         ValueKind.Decimal => Math.Max(1, IntegerDigits) + (Scale > 0 ? 1 + Scale : 0),
-        ValueKind.Bit => 1,
+        ValueKind.Bit => BoolWords ? 5 : 1,
         ValueKind.Date => 10,
         ValueKind.Time => 8,
         ValueKind.Timestamp => 19,
@@ -74,8 +79,8 @@ public static class ParameterMapper
             Native.SQL_BINARY or Native.SQL_VARBINARY or Native.SQL_LONGVARBINARY =>
                 new InsertColumn { Column = c, SqlName = sqlName, Kind = ValueKind.Binary, Length = variable },
             // psqlODBC and the drivers derived from it describe boolean as a short character column.
-            Native.SQL_CHAR or Native.SQL_VARCHAR or Native.SQL_WCHAR or Native.SQL_WVARCHAR when IsBoolean(c.TypeName) =>
-                new InsertColumn { Column = c, SqlName = sqlName, Kind = ValueKind.Bit, AsText = true },
+            Native.SQL_CHAR or Native.SQL_VARCHAR or Native.SQL_WCHAR or Native.SQL_WVARCHAR when TypeMapper.IsBooleanTypeName(c.TypeName) =>
+                new InsertColumn { Column = c, SqlName = sqlName, Kind = ValueKind.Bit, AsText = true, BoolWords = true },
             Native.SQL_CHAR or Native.SQL_VARCHAR or Native.SQL_LONGVARCHAR or
             Native.SQL_WCHAR or Native.SQL_WVARCHAR or Native.SQL_WLONGVARCHAR =>
                 new InsertColumn { Column = c, SqlName = sqlName, Kind = ValueKind.Text, Length = variable, AsText = true },
@@ -98,9 +103,6 @@ public static class ParameterMapper
         Apply(column);
         return true;
     }
-
-    private static bool IsBoolean(string typeName) =>
-        typeName.Equals("bool", StringComparison.OrdinalIgnoreCase) || typeName.Equals("boolean", StringComparison.OrdinalIgnoreCase);
 
     private static InsertColumn Integer(ColumnInfo c, string sqlName, long modulus) =>
         new() { Column = c, SqlName = sqlName, Kind = ValueKind.Integer, Modulus = modulus };

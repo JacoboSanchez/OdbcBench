@@ -53,13 +53,44 @@ public class InsertTests
     }
 
     [Fact]
-    public void Boolean_described_as_text_gets_bit_values()
+    public void Boolean_described_as_text_is_sent_as_true_or_false()
     {
         var b = Map(Column(1, "flag", Native.SQL_VARCHAR, 5, typeName: "bool"));
         Assert.Equal(ValueKind.Bit, b.Kind);
+        Assert.True(b.AsText);
+        Assert.Equal("true", DataGenerator.Text(b, 1));
+        Assert.Equal("false", DataGenerator.Text(b, 2));
+        var (length, bytes) = Write(b, 2);
+        Assert.Equal("false", System.Text.Encoding.Unicode.GetString(bytes, 0, length));
+        Assert.Equal((5 + 1) * 2, b.Column.ElementBytes);
+    }
+
+    [Fact]
+    public void Bit_sent_as_text_in_wchar_mode_stays_0_or_1()
+    {
+        var b = Map(Column(1, "flag", Native.SQL_BIT, 1), BindMode.WChar);
+        Assert.True(b.AsText);
         Assert.Equal("1", DataGenerator.Text(b, 1));
         Assert.Equal("0", DataGenerator.Text(b, 2));
     }
+
+    [Fact]
+    public void Boolean_described_as_text_compares_as_bool()
+    {
+        Assert.Equal(TypeFamily.Bool, Column(1, "flag", Native.SQL_VARCHAR, 5, typeName: "bool").Family);
+        Assert.Equal(TypeFamily.Text, Column(1, "flag", Native.SQL_VARCHAR, 5, typeName: "varchar").Family);
+
+        var target = new InsertTarget("t", null, BindMode.Native, 16, CleanupMode.Delete);
+        target.Build(new[] { Column(1, "id", Native.SQL_INTEGER, 10), Column(2, "flag", Native.SQL_VARCHAR, 5, typeName: "bool") }, new HashSet<int>(), "\"");
+        var sent = target.SentSample(2);
+        var readBack = Sample("psql", new List<ColumnInfo> { Column(1, "id", Native.SQL_INTEGER, 10), Column(2, "flag", Native.SQL_VARCHAR, 5, typeName: "bool") },
+            new string?[] { "1", "1" }, new string?[] { "2", "0" }); // psqlODBC's BoolsAsChar reads true back as 1
+        var result = OdbcBench.Validation.ResultComparer.Compare(new[] { sent, readBack }, target.ReadBackSql, new OdbcBench.Validation.NormalizationOptions());
+        Assert.Equal("PASS", result.Status);
+    }
+
+    private static OdbcBench.Validation.SampleResult Sample(string dsn, List<ColumnInfo> columns, params string?[][] rows) =>
+        new() { DsnName = dsn, Columns = columns, Rows = rows.ToList() };
 
     [Fact]
     public void Wchar_mode_sends_everything_but_binary_as_text()
