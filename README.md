@@ -8,39 +8,43 @@ OdbcBench compares ODBC drivers, or versions of one driver, on the same `SELECT`
 
 `OdbcBench insert` does the same for writes: it inserts generated rows into a table with parameter arrays and compares the drivers. See [Batch insert benchmark](#batch-insert-benchmark).
 
-The tool calls the ODBC API directly in `odbc32.dll`, the Windows Driver Manager. It uses no wrapper such as pyodbc or System.Data.Odbc, so every ODBC function in the measured path is explicit and listed below.
+The tool calls the ODBC API of the Driver Manager directly: `odbc32.dll` on Windows, unixODBC's `libodbc` on Linux and macOS. It uses no wrapper such as pyodbc or System.Data.Odbc, so every ODBC function in the measured path is explicit and listed below.
 
-It is **64-bit only**. It loads the 64-bit Driver Manager and therefore sees only 64-bit drivers and DSNs. Those are the ones in `C:\Windows\System32\odbcad32.exe`.
+It is **64-bit only**. It loads the 64-bit Driver Manager and therefore sees only 64-bit drivers and DSNs. On Windows those are the ones in `C:\Windows\System32\odbcad32.exe`; on Linux and macOS they are the ones in the `odbc.ini` and `odbcinst.ini` files that `odbcinst -j` lists.
 
 ## Requirements and build
 
-- Windows x64 and the .NET 8 SDK (runtime 8.0 or later to run).
+- Windows, Linux or macOS on a 64-bit CPU (x64 or ARM64), and the .NET 8 SDK (runtime 8.0 or later to run).
+- On Linux and macOS, **unixODBC** 2.3 or later (`apt install unixodbc`, `dnf install unixODBC`, `brew install unixodbc`). iODBC is not supported: its `SQLWCHAR` is 4 bytes, while the tool passes UTF-16 strings.
 - The 64-bit ODBC drivers you want to compare, and DSNs or connection strings for them.
 
-```powershell
+```sh
 dotnet build -c Release
 dotnet test                       # unit tests; no database needed
-dotnet publish src/OdbcBench -c Release -p:PublishSingleFile=true -o publish
+dotnet publish src/OdbcBench -c Release -r win-x64   -p:PublishSingleFile=true -o publish   # Windows
+dotnet publish src/OdbcBench -c Release -r linux-x64 -p:PublishSingleFile=true -o publish   # Linux (or linux-arm64, osx-arm64)
 ```
 
-The executable is `publish\OdbcBench.exe`. During development it is `src\OdbcBench\bin\Release\net8.0\win-x64\OdbcBench.exe`.
+The executable is `publish/OdbcBench.exe` on Windows and `publish/OdbcBench` elsewhere. During development it is `src/OdbcBench/bin/Release/net8.0/OdbcBench[.exe]`.
+
+On Linux and macOS the tool looks for `libodbc.so.2` (`libodbc.2.dylib` on macOS) on the library path. Set `ODBCBENCH_DRIVER_MANAGER` to a file name or full path to load a different Driver Manager build.
 
 ## Quick start
 
-1. Copy `samples\config.sample.json` to `bench.json`. Set the query, then one entry per DSN.
+1. Copy `samples/config.sample.json` to `bench.json`. Set the query, then one entry per DSN.
 2. Check that every DSN connects and that the columns are bound as you expect:
 
-   ```powershell
+   ```sh
    OdbcBench probe --config bench.json
    ```
 
 3. Run the comparison:
 
-   ```powershell
+   ```sh
    OdbcBench run --config bench.json
    ```
 
-The report lands in `results\run-<date>-<time>.md`, next to the `.json` with the raw data.
+The report lands in `results/run-<date>-<time>.md`, next to the `.json` with the raw data.
 
 Before comparing two drivers, run an **A/A test**: list the same DSN twice under two names. The spread between the two tells you the noise floor of your setup. A difference between drivers smaller than that is not a finding.
 
@@ -109,7 +113,7 @@ A DSN entry needs a `name` plus either `dsn` or a full `connectionString`. Crede
 | `maxConsecutiveErrors` | `3` | A series stops after this many failed iterations in a row. |
 | `cacheBuster` | `false` | Appends a unique comment to every execution to defeat result caches. It also defeats plan-cache reuse. |
 | `calibrate` | `true` | Measures the harness's own value-reading cost. |
-| `processPriority` | `normal` | Or `aboveNormal` or `high`. |
+| `processPriority` | `normal` | Or `aboveNormal` or `high`. On Linux and macOS raising the priority needs root or `CAP_SYS_NICE`; without it the run continues at normal priority with a warning. |
 | `pauseBetweenIterationsMs` | `0` | Sleep between iterations. |
 | `odbcVersion` | `3.80` | Or `3.0` for a driver that misbehaves under ODBC 3.8 behaviour. |
 | `validation.rows` | `10` | Rows compared. |
@@ -123,7 +127,7 @@ Passwords never reach the report, the JSON or the console. Secret-looking attrib
 
 **Setup, once per run.** `SQLSetEnvAttr(SQL_ATTR_CONNECTION_POOLING, SQL_CP_OFF)`, `SQLAllocHandle(ENV)` and `SQLSetEnvAttr(SQL_ATTR_ODBC_VERSION, 3.80)`.
 
-**Per DSN.** `SQLDriverConnectW` opens one connection that every iteration reuses. `SQLGetInfoW` reads the driver and DBMS identity and the `SQL_GETDATA_EXTENSIONS` bits. The tool also checks whether the driver exports Unicode entry points; if not, the Driver Manager converts every string, and that cost is part of that driver's time.
+**Per DSN.** `SQLDriverConnectW` opens one connection that every iteration reuses. `SQLGetInfoW` reads the driver and DBMS identity and the `SQL_GETDATA_EXTENSIONS` bits. On Windows the tool also checks whether the driver exports Unicode entry points; if not, the Driver Manager converts every string, and that cost is part of that driver's time. unixODBC does not expose the driver's module handle, so on Linux and macOS this shows as "unknown".
 
 **Per series, meaning one DSN at one block size.** One statement handle is kept for the whole run. It is set to forward-only and read-only, with `SQL_ATTR_ROW_BIND_TYPE = SQL_BIND_BY_COLUMN` and `SQL_ATTR_ROW_ARRAY_SIZE = N`. The row array size is read back with `SQLGetStmtAttrW`, because drivers may lower it. The report shows the size that actually ran.
 
@@ -147,7 +151,7 @@ Every value is read from the bound arrays through raw pointers and folded into a
 - `rowByRow` (the default) reads long columns completely with chunked `SQLGetData`. This needs a row array size of 1, so block fetch is off for that query and the report says so. Drivers without `SQL_GD_ANY_COLUMN` also read every later column with `SQLGetData`.
 - `bindCapped` keeps block fetch. Long values are bound with a buffer of `longColumnCapBytes`, and truncated values are counted.
 
-**Resources.** CPU is process user + kernel time. Windows counts it in ticks of about 15.6 ms, so it is coarse for short iterations. Forced garbage collections happen between iterations, outside the timers.
+**Resources.** CPU is process user + kernel time (`GetProcessTimes` on Windows, `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` on Linux and macOS). Windows counts it in ticks of about 15.6 ms, so there it is coarse for short iterations. Forced garbage collections happen between iterations, outside the timers.
 
 ## Validation
 
@@ -186,7 +190,7 @@ Percentiles use the nearest-rank method. Outliers, meaning samples above p50 + 3
 
 - Use an `ORDER BY`, so validation compares the same rows and checksums are stable.
 - Use enough iterations: 20 at least, 30 or more for a meaningful p95, and more when an iteration takes under 50 ms.
-- Keep `interleave` on, use the High performance power plan, and keep other load off the client and the server.
+- Keep `interleave` on, use the High performance power plan on Windows or the `performance` cpufreq governor on Linux (the report records either), and keep other load off the client and the server.
 - Engines with result caches, such as Dremio reflections, can make repeated executions unrealistically fast. Compare with `cacheBuster: true` if that matters.
 - When DSNs point at different database engines, the comparison covers engine plus driver, not the driver alone.
 
@@ -195,9 +199,9 @@ Percentiles use the nearest-rank method. Outliers, meaning samples above p50 + 3
 `OdbcBench insert` writes generated rows into a table through every DSN and compares how long the drivers take. It uses the settings above (DSNs, iterations, warmup, interleaving, `bindMode`, `reuseStatement`, `connectionPerIteration`, `maxBoundBytes`) plus an `insert` section. `blockSizes`, or `--batch-size`, gives the parameter array sizes, one series each. A single configuration file can hold both the query and the `insert` section.
 
 1. Create an empty table that every DSN can write to. The tool never creates or drops tables. Without `cleanup`, the table must accept the same rows again in every iteration.
-2. Add the `insert` section. `samples\insert.sample.json` has a complete example.
+2. Add the `insert` section. `samples/insert.sample.json` has a complete example.
 3. `OdbcBench probe --config bench.json` describes the table, prepares the INSERT and binds the parameters without executing anything. It shows the statement, the effective parameter array size, whether autocommit can be turned off, and the value each column receives for row 1.
-4. `OdbcBench insert --config bench.json` runs the benchmark. The report lands in `results\run-insert-<date>-<time>.md`.
+4. `OdbcBench insert --config bench.json` runs the benchmark. The report lands in `results/run-insert-<date>-<time>.md`.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -237,8 +241,10 @@ Numeric, integer, float, bit, date, timestamp and GUID columns bind as their C t
 
 | Symptom | Cause |
 |---|---|
-| `IM002` data source name not found | The DSN is missing, or it exists only in the 32-bit ODBC administrator. The tool's hint tells you which. Create it in the 64-bit administrator. |
-| `IM014` architecture mismatch | The DSN points at a 32-bit driver. |
+| `IM002` data source name not found | The DSN is missing, or on Windows it exists only in the 32-bit ODBC administrator. The tool's hint tells you which. Create it in the 64-bit administrator, or on Linux and macOS add a section to `~/.odbc.ini` or the system `odbc.ini` (`odbcinst -j` shows which files unixODBC reads; `ODBCINI` and `ODBCSYSINI` move them). |
+| `IM014` architecture mismatch | Windows: the DSN points at a 32-bit driver. |
+| `01000` Can't open lib (unixODBC) | The driver named in the DSN is not in `odbcinst.ini`, or its `Driver=` library does not exist or has missing dependencies (check with `ldd`). |
+| `ODBC Driver Manager not found` | Linux and macOS: unixODBC is not installed or not on the library path. Install it or set `ODBCBENCH_DRIVER_MANAGER`. |
 | Row array size changed | The driver capped `SQL_ATTR_ROW_ARRAY_SIZE` (SQLSTATE 01S02). The report shows the effective value. |
 | Truncated values | The driver reports column sizes smaller than the data. Raise `longColumnThresholdBytes` or use `bindMode: wchar`. |
 | `SQL_ATTR_QUERY_TIMEOUT ... not accepted` | Informational: some drivers do not support query timeouts. |
@@ -251,10 +257,10 @@ Numeric, integer, float, bit, date, timestamp and GUID columns bind as their C t
 
 | Path | Contents |
 |---|---|
-| `src\OdbcBench\Odbc` | P/Invoke declarations and thin wrappers for the environment, connection and statement handles, type mapping, and registry hints. |
-| `src\OdbcBench\Fetch` | The block-fetch reader, binding plan, column buffers, and chunked `SQLGetData`. |
-| `src\OdbcBench\Insert` | The batch insert writer, target table description, parameter mapping, and value generator. |
-| `src\OdbcBench\Validation` | Sample reader, value normalisation and comparison. |
-| `src\OdbcBench\Bench` | Runner, statistics, analysis and system information. |
-| `src\OdbcBench\Report` | Result model, JSON writer and Markdown writer. |
-| `tests\OdbcBench.Tests` | Unit tests and the golden reports (`Golden\report.md`, `Golden\insert-report.md`). After an intended report change, regenerate them with `UPDATE_GOLDEN=1`. |
+| `src/OdbcBench/Odbc` | P/Invoke declarations and thin wrappers for the environment, connection and statement handles, type mapping, Driver Manager loading, and DSN hints (registry on Windows, `odbc.ini` on unixODBC). |
+| `src/OdbcBench/Fetch` | The block-fetch reader, binding plan, column buffers, and chunked `SQLGetData`. |
+| `src/OdbcBench/Insert` | The batch insert writer, target table description, parameter mapping, and value generator. |
+| `src/OdbcBench/Validation` | Sample reader, value normalisation and comparison. |
+| `src/OdbcBench/Bench` | Runner, statistics, analysis and system information. |
+| `src/OdbcBench/Report` | Result model, JSON writer and Markdown writer. |
+| `tests/OdbcBench.Tests` | Unit tests and the golden reports (`Golden/report.md`, `Golden/insert-report.md`). After an intended report change, regenerate them with `UPDATE_GOLDEN=1`. |

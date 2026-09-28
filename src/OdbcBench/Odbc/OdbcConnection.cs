@@ -95,7 +95,9 @@ public sealed unsafe class OdbcConnection : IDisposable
     public DriverInfo ReadDriverInfo()
     {
         bool? unicodeNative = null;
-        nint driverModule = GetInfoPointer(Native.SQL_DRIVER_HLIB);
+        // Only odbc32.dll returns a module handle usable with GetProcAddress. unixODBC returns its libltdl handle,
+        // which dlsym must not be given, so on Linux and macOS the answer stays "unknown".
+        nint driverModule = OperatingSystem.IsWindows() ? GetInfoPointer(Native.SQL_DRIVER_HLIB) : 0;
         if (driverModule != 0)
         {
             // The Driver Manager's own criterion for a Unicode driver: it exports SQLConnectW.

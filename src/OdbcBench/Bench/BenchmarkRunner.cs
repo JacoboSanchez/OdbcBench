@@ -195,7 +195,7 @@ public sealed class BenchmarkRunner
                 result.Status = "connect failed";
                 result.Error = ex.Message;
                 result.ErrorSqlState = ex.SqlState;
-                result.Hint = OdbcRegistry.Hint(cfg.Dsn, ex.SqlState);
+                result.Hint = OdbcDataSources.Hint(cfg.Dsn, ex.SqlState);
                 Message("connect", "error", ex.Message + (result.Hint != null ? " " + result.Hint : ""), cfg.Name, sqlState: ex.SqlState);
                 Log($"  {cfg.Name}: CONNECT FAILED {ex.Message}");
                 if (result.Hint != null) Log($"  {cfg.Name}: hint: {result.Hint}");
