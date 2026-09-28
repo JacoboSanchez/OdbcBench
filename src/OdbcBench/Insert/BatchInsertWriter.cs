@@ -478,11 +478,16 @@ public sealed unsafe class BatchInsertWriter : IResultReader
         _currentArraySize = size;
     }
 
+    /// <summary>
+    /// Binds every parameter array, then prepares the INSERT. Binding first is valid ODBC and fails cleanly on a driver
+    /// without SQLBindParameter; some such drivers crash inside SQLPrepareW on DML instead of returning an error.
+    /// </summary>
     private void PrepareAndBind(OdbcStatement statement, IterationSample sample)
     {
         long t0 = Stopwatch.GetTimestamp();
 
         var columns = _target.Columns;
+        var fallbacks = new List<string>();
         for (int attempt = 0; ; attempt++)
         {
             var plan = BuildPlan(columns);
@@ -502,7 +507,6 @@ public sealed unsafe class BatchInsertWriter : IResultReader
             _processedPtrSet = arrays && TrySetPointer(statement, Native.SQL_ATTR_PARAMS_PROCESSED_PTR, _processed, "SQL_ATTR_PARAMS_PROCESSED_PTR");
             _statusPtrSet = arrays && TrySetPointer(statement, Native.SQL_ATTR_PARAM_STATUS_PTR, _status, "SQL_ATTR_PARAM_STATUS_PTR");
 
-            statement.Prepare(_target.InsertSql);
             try
             {
                 for (int i = 0; i < _buffers.Length; i++)
@@ -519,14 +523,17 @@ public sealed unsafe class BatchInsertWriter : IResultReader
                 if (column == null) throw;
                 string rejected = column.Column.CTypeName;
                 if (!ParameterMapper.ForceText(column)) throw;
-                AddWarningOnce($"column '{column.Column.Name}' ({column.Column.SqlTypeName}): driver rejected {rejected} ({ex.SqlState}); bound as SQL_C_WCHAR instead");
+                // Reported only once the text binding is accepted: a driver without SQLBindParameter rejects that too.
+                fallbacks.Add($"column '{column.Column.Name}' ({column.Column.SqlTypeName}): driver rejected {rejected} ({ex.SqlState}); bound as SQL_C_WCHAR instead");
                 statement.ResetParameters();
                 continue;
             }
+            statement.Prepare(_target.InsertSql);
 
             _plan = plan;
             _columns = plan.Columns.ToList();
             _slots = BuildSlots(columns);
+            foreach (var w in fallbacks) AddWarningOnce(w);
             foreach (var w in plan.Warnings) AddWarningOnce(w);
             _bound = true;
             break;
