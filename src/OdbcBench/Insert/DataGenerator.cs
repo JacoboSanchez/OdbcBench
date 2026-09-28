@@ -142,8 +142,16 @@ public static unsafe class DataGenerator
                 return n + column.Scale;
             }
             case ValueKind.Bit:
-                target[0] = (row & 1) == 0 ? '0' : '1';
-                return 1;
+            {
+                if (!column.BoolWords)
+                {
+                    target[0] = (row & 1) == 0 ? '0' : '1'; // ODBC's text to SQL_BIT conversion defines only 0 and 1
+                    return 1;
+                }
+                string word = (row & 1) == 0 ? "false" : "true";
+                for (int i = 0; i < word.Length; i++) target[i] = word[i];
+                return word.Length;
+            }
             case ValueKind.Date:
                 return WriteDate(target, Date(row));
             case ValueKind.Time:

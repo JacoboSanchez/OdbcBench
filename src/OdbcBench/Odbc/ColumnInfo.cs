@@ -34,7 +34,8 @@ public sealed class ColumnInfo
     /// <summary>True when the native binding was rejected (07006) and the column fell back to SQL_C_WCHAR.</summary>
     public bool FellBackToText { get; set; }
 
-    public TypeFamily Family => TypeMapper.FamilyOf(SqlType);
+    /// <summary>Family the values are compared as: a character column named bool or boolean (psqlODBC's BoolsAsChar) compares as Bool.</summary>
+    public TypeFamily Family => TypeMapper.FamilyOf(SqlType, TypeName);
     public string SqlTypeName => TypeMapper.SqlTypeName(SqlType);
     public string CTypeName => TypeMapper.CTypeName(CType);
     public long ColumnSizeClamped => (ulong)ColumnSize > long.MaxValue ? long.MaxValue : (long)(ulong)ColumnSize;
@@ -64,6 +65,19 @@ public static class TypeMapper
         Native.SQL_GUID => TypeFamily.Guid,
         _ => TypeFamily.Other,
     };
+
+    /// <summary>
+    /// As <see cref="FamilyOf(short)"/>, except that a character column whose type name is bool or boolean is Bool:
+    /// psqlODBC and the drivers derived from it describe PostgreSQL booleans that way.
+    /// </summary>
+    public static TypeFamily FamilyOf(short sqlType, string typeName)
+    {
+        var family = FamilyOf(sqlType);
+        return family == TypeFamily.Text && IsBooleanTypeName(typeName) ? TypeFamily.Bool : family;
+    }
+
+    public static bool IsBooleanTypeName(string typeName) =>
+        typeName.Equals("bool", StringComparison.OrdinalIgnoreCase) || typeName.Equals("boolean", StringComparison.OrdinalIgnoreCase);
 
     public static bool IsInterval(short sqlType) => sqlType is >= Native.SQL_INTERVAL_YEAR and <= Native.SQL_INTERVAL_MINUTE_TO_SECOND;
 
@@ -145,7 +159,7 @@ public static class TypeMapper
     public static long TextCharsForWCharMode(ColumnInfo c)
     {
         if (c.DisplaySize > 0) return c.DisplaySize;
-        return c.Family switch
+        return FamilyOf(c.SqlType) switch // the declared type, not the compared family: a boolean described as text arrives as text
         {
             TypeFamily.Text => MaxOf(c.ColumnSizeClamped, c.Length),
             TypeFamily.Integer => 21,
