@@ -33,6 +33,8 @@ public class InitializationTests
         Assert.Equal(qualified, d.Qualify("bench", "read_narrow_10"));
         Assert.Equal(binary, d.Type(SqlType.Binary, 64));
         Assert.Equal(boolean, d.Type(SqlType.Boolean));
+        // A probe that named a column would read "missing column" as "missing table" and skip the drop on --recreate.
+        Assert.Equal($"SELECT 1 FROM {qualified} WHERE 1 = 0", d.TableProbeSql(d.Qualify("bench", "read_narrow_10")));
     }
 
     [Fact]

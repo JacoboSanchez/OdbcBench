@@ -34,6 +34,8 @@ public abstract class SqlDialect
     public virtual string? SchemaExistsSql(string schema) =>
         $"SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = '{Literal(schema)}'";
     public virtual string? CreateSchemaSql(string schema) => schema.Length == 0 ? null : $"CREATE SCHEMA {Quote(schema)}";
+    // Names no column, so a table with a generated name but a different layout still counts as existing.
+    public virtual string TableProbeSql(string qualifiedTable) => $"SELECT 1 FROM {qualifiedTable} WHERE 1 = 0";
     public virtual string DropTableSql(string qualifiedTable) => $"DROP TABLE {qualifiedTable}";
     public virtual string CreateIndexSql(string indexName, string qualifiedTable, string column, bool unique) =>
         $"CREATE {(unique ? "UNIQUE " : "")}INDEX {Quote(indexName)} ON {qualifiedTable} ({Quote(column)})";

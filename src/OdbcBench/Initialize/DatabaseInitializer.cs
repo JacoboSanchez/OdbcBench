@@ -112,7 +112,7 @@ public sealed class DatabaseInitializer
         using var statement = new OdbcStatement(_connection);
         try
         {
-            statement.ExecDirect($"SELECT {_dialect.Quote("id")} FROM {table.QualifiedName(_dialect, _schema)} WHERE 1 = 0");
+            statement.ExecDirect(_dialect.TableProbeSql(table.QualifiedName(_dialect, _schema)));
             return true;
         }
         catch (OdbcException ex) when (ex.SqlState is { } state && (state.StartsWith("42", StringComparison.Ordinal) || state == "S0002"))
