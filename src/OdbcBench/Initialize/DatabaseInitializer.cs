@@ -53,9 +53,9 @@ public sealed class DatabaseInitializer
             if (!table.IsInsertTarget) Populate(table);
             if (_options.CreateIndexes && !table.IsInsertTarget)
             {
-                Execute(_dialect.CreateIndexSql(IndexName(table, "id"), qualified, "id", unique: true));
+                Execute(_dialect.CreateIndexSql(_schema, IndexName(table, "id"), qualified, "id", unique: true));
                 if (table.Columns.Any(c => c.Name == "category"))
-                    Execute(_dialect.CreateIndexSql(IndexName(table, "category"), qualified, "category", unique: false));
+                    Execute(_dialect.CreateIndexSql(_schema, IndexName(table, "category"), qualified, "category", unique: false));
             }
             if (_options.Analyze && !table.IsInsertTarget && _dialect.AnalyzeSql(_schema, table.Name) is string analyze)
                 Execute(analyze);

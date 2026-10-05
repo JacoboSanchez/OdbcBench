@@ -57,6 +57,16 @@ public class InitializationTests
         Assert.Equal(63, postgres.FitIdentifier(new string('x', 64)).Length);
     }
 
+    [Theory]
+    [InlineData("PostgreSQL", "CREATE UNIQUE INDEX \"ix_t_id\" ON \"bench\".\"t\" (\"id\")")]
+    [InlineData("Microsoft SQL Server", "CREATE UNIQUE INDEX [ix_t_id] ON [bench].[t] ([id])")]
+    [InlineData("Oracle", "CREATE UNIQUE INDEX \"BENCH\".\"IX_T_ID\" ON \"BENCH\".\"T\" (\"ID\")")]
+    public void Indexes_are_created_in_the_table_schema(string dbms, string expected)
+    {
+        var d = SqlDialect.Detect(dbms);
+        Assert.Equal(expected, d.CreateIndexSql("bench", "ix_t_id", d.Qualify("bench", "t"), "id", unique: true));
+    }
+
     [Fact]
     public void Table_ddl_is_generated_from_logical_columns()
     {

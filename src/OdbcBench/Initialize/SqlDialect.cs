@@ -37,8 +37,10 @@ public abstract class SqlDialect
     // Names no column, so a table with a generated name but a different layout still counts as existing.
     public virtual string TableProbeSql(string qualifiedTable) => $"SELECT 1 FROM {qualifiedTable} WHERE 1 = 0";
     public virtual string DropTableSql(string qualifiedTable) => $"DROP TABLE {qualifiedTable}";
-    public virtual string CreateIndexSql(string indexName, string qualifiedTable, string column, bool unique) =>
-        $"CREATE {(unique ? "UNIQUE " : "")}INDEX {Quote(indexName)} ON {qualifiedTable} ({Quote(column)})";
+    public string CreateIndexSql(string schema, string indexName, string qualifiedTable, string column, bool unique) =>
+        $"CREATE {(unique ? "UNIQUE " : "")}INDEX {IndexReference(schema, indexName)} ON {qualifiedTable} ({Quote(column)})";
+    // PostgreSQL and SQL Server always put an index in its table's schema and reject a schema-qualified index name.
+    protected virtual string IndexReference(string schema, string indexName) => Quote(indexName);
     public abstract string? AnalyzeSql(string schema, string table);
 
     public static SqlDialect Detect(string dbmsName)
@@ -115,6 +117,8 @@ internal sealed class OracleDialect : SqlDialect
     // Unquoted Oracle identifiers fold to upper case. Generate conventional quoted names that remain addressable
     // through drivers which return upper-case metadata, even when the config used lower case.
     public override string Quote(string identifier) => base.Quote(identifier.ToUpperInvariant());
+    // Without a schema, Oracle creates the index in the login user's schema rather than in the table's.
+    protected override string IndexReference(string schema, string indexName) => Qualify(schema, indexName);
     public override string Type(SqlType type, int size = 0) => type switch
     {
         SqlType.SmallInt => "NUMBER(5)",
