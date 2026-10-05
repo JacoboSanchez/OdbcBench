@@ -175,7 +175,7 @@ the driver's chunked long-value path.
 
 | `initialize` field | Default | Meaning |
 |---|---|---|
-| `schema` | `odbcbench` | Schema for generated objects. Empty uses the connection's default schema. Oracle schemas are users: name an existing user or use empty. |
+| `schema` | `odbcbench` | Schema for generated objects. Empty uses the connection's default schema. Oracle schemas are users: name an existing user or use empty; initializing another user's schema needs `SELECT ANY TABLE`. |
 | `existing` | `fail` | Refuse to touch an existing generated table. `recreate` (or `--recreate`) drops and rebuilds it. |
 | `rowCounts` | `[10000, 1000000]` | One read table size for every selected shape. `--rows` overrides it. |
 | `shapes` | all four | Any of `narrow`, `wide`, `text`, `numeric`. |

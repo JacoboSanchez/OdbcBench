@@ -33,6 +33,7 @@ public sealed class DatabaseInitializer
         var tables = InitializationCatalog.Build(_options);
         RequireFittingNames(_schema, tables, _dialect);
         EnsureSchema();
+        RequireTableVisibility();
 
         var existing = tables.Where(TableExists).ToList();
         if (existing.Count > 0 && !_options.Existing.Equals("recreate", StringComparison.OrdinalIgnoreCase))
@@ -85,6 +86,12 @@ public sealed class DatabaseInitializer
             throw new InvalidOperationException($"schema '{_schema}' does not exist; Oracle schemas are database users, so create the user first or set initialize.schema to an existing user (or to an empty string for the current schema)");
         Status($"Creating schema {_dialect.Quote(_schema)}");
         Execute(create);
+    }
+
+    private void RequireTableVisibility()
+    {
+        if (_dialect.TableVisibilitySql(_schema) is string sql && !QueryHasRows(sql))
+            throw new InvalidOperationException($"{_dialect.Name} reports a table this account cannot read as missing, so init cannot tell which generated tables already exist in {(_schema.Length == 0 ? "the current schema" : $"schema {_dialect.Quote(_schema)}")}; connect as that schema's owner or grant SELECT ANY TABLE");
     }
 
     private void Populate(InitializationTable table)
