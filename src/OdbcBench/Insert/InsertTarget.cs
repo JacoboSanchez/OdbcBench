@@ -26,6 +26,7 @@ public sealed class InsertTarget
     private readonly BindMode _bindMode;
     private readonly int _valueLength;
     private readonly List<string> _notes = new();
+    private readonly IReadOnlyDictionary<string, short>? _valueTypes;
     private List<InsertColumn>? _columns;
 
     public string Table { get; }
@@ -35,9 +36,12 @@ public sealed class InsertTarget
     /// <summary>Null when the table is left as it is between iterations.</summary>
     public string? CleanupSql { get; }
 
-    public InsertTarget(string table, IReadOnlyList<string>? columns, BindMode bindMode, int valueLength, CleanupMode cleanup)
+    /// <param name="valueTypes">Logical SQL type of each column by name, when known; see <see cref="ParameterMapper.Map"/>.</param>
+    public InsertTarget(string table, IReadOnlyList<string>? columns, BindMode bindMode, int valueLength, CleanupMode cleanup,
+        IReadOnlyDictionary<string, short>? valueTypes = null)
     {
         Table = table;
+        _valueTypes = valueTypes;
         RequestedColumns = columns is { Count: > 0 } ? columns : null;
         _bindMode = bindMode;
         _valueLength = valueLength;
@@ -119,7 +123,8 @@ public sealed class InsertTarget
                 notes.Add($"column '{c.Name}' is auto-increment and was left out of the INSERT");
                 continue;
             }
-            var column = ParameterMapper.Map(c, sqlName, _bindMode, _valueLength);
+            var column = ParameterMapper.Map(c, sqlName, _bindMode, _valueLength,
+                _valueTypes != null && _valueTypes.TryGetValue(c.Name, out short valueType) ? valueType : null);
             if (column != null)
             {
                 columns.Add(column);

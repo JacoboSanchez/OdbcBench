@@ -1,8 +1,27 @@
 using OdbcBench.Config;
+using OdbcBench.Odbc;
 
 namespace OdbcBench.Initialize;
 
-public sealed record InitializationColumn(string Name, SqlType Type, int Size = 0, bool Required = false);
+public sealed record InitializationColumn(string Name, SqlType Type, int Size = 0, bool Required = false)
+{
+    /// <summary>The ODBC SQL type of the logical column, which picks its generated values whatever the DBMS stores.</summary>
+    public short OdbcType => Type switch
+    {
+        SqlType.SmallInt => Native.SQL_SMALLINT,
+        SqlType.Integer => Native.SQL_INTEGER,
+        SqlType.BigInt => Native.SQL_BIGINT,
+        SqlType.Real => Native.SQL_REAL,
+        SqlType.Double => Native.SQL_DOUBLE,
+        SqlType.Decimal => Native.SQL_DECIMAL,
+        SqlType.Boolean => Native.SQL_BIT,
+        SqlType.Date => Native.SQL_TYPE_DATE,
+        SqlType.Timestamp => Native.SQL_TYPE_TIMESTAMP,
+        SqlType.VarChar => Native.SQL_VARCHAR,
+        SqlType.Binary => Native.SQL_VARBINARY,
+        _ => throw new ArgumentOutOfRangeException(nameof(Type)),
+    };
+}
 
 public sealed class InitializationTable
 {

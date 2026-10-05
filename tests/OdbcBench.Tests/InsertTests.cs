@@ -89,6 +89,39 @@ public class InsertTests
         Assert.Equal("PASS", result.Status);
     }
 
+    [Fact]
+    public void Logical_types_pick_the_values_when_the_description_loses_them()
+    {
+        // How Oracle describes the wide shape: DATE as a timestamp, NUMBER(5) and NUMBER(1) as decimals.
+        var described = new[]
+        {
+            Column(1, "CATEGORY", Native.SQL_DECIMAL, 5),
+            Column(2, "FLAG", Native.SQL_DECIMAL, 1),
+            Column(3, "BUSINESS_DATE", Native.SQL_TYPE_TIMESTAMP, 19),
+            Column(4, "AMOUNT", Native.SQL_DECIMAL, 18, 4),
+        };
+        var logical = new Dictionary<string, short>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["category"] = Native.SQL_SMALLINT, ["flag"] = Native.SQL_BIT, ["business_date"] = Native.SQL_TYPE_DATE, ["amount"] = Native.SQL_DECIMAL,
+        };
+        var target = new InsertTarget("t", null, BindMode.Native, 16, CleanupMode.None, logical);
+        target.Build(described, new HashSet<int>(), "\"");
+
+        var c = target.Columns;
+        Assert.Equal((ValueKind.Integer, 1L << 15), (c[0].Kind, c[0].Modulus));
+        Assert.Equal(ValueKind.Bit, c[1].Kind);
+        Assert.Equal(ValueKind.Date, c[2].Kind);
+        Assert.Equal((ValueKind.Decimal, 4), (c[3].Kind, c[3].Scale));
+        // The binding keeps the described SQL type; only the C type follows the logical values.
+        Assert.Equal(Native.SQL_TYPE_TIMESTAMP, c[2].Column.SqlType);
+        Assert.Equal(Native.SQL_C_TYPE_DATE, c[2].Column.CType);
+
+        // Without logical types, the description decides as before.
+        var plain = new InsertTarget("t", null, BindMode.Native, 16, CleanupMode.None);
+        plain.Build(new[] { Column(1, "FLAG", Native.SQL_DECIMAL, 1), Column(2, "BUSINESS_DATE", Native.SQL_TYPE_TIMESTAMP, 19) }, new HashSet<int>(), "\"");
+        Assert.Equal(new[] { ValueKind.Decimal, ValueKind.Timestamp }, plain.Columns.Select(x => x.Kind));
+    }
+
     private static OdbcBench.Validation.SampleResult Sample(string dsn, List<ColumnInfo> columns, params string?[][] rows) =>
         new() { DsnName = dsn, Columns = columns, Rows = rows.ToList() };
 

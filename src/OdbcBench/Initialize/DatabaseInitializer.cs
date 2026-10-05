@@ -111,7 +111,9 @@ public sealed class DatabaseInitializer
     private void Populate(InitializationTable table)
     {
         string qualified = table.QualifiedName(_dialect, _schema);
-        var target = new InsertTarget(qualified, null, BindMode.Native, _options.ValueLength, CleanupMode.None);
+        // Values follow the logical columns, so every DBMS gets the same dataset (Oracle describes DATE as a timestamp).
+        var valueTypes = table.Columns.ToDictionary(c => c.Name, c => c.OdbcType, StringComparer.OrdinalIgnoreCase);
+        var target = new InsertTarget(qualified, null, BindMode.Native, _options.ValueLength, CleanupMode.None, valueTypes);
         var options = new InsertOptions
         {
             BatchSize = _options.BatchSize,
