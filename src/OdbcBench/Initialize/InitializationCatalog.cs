@@ -35,7 +35,7 @@ public static class InitializationCatalog
             foreach (long rows in config.RowCounts)
                 result.Add(new InitializationTable
                 {
-                    Name = $"read_{shape}_{rows}",
+                    Name = ReadTableName(shape, rows),
                     Shape = shape,
                     Rows = rows,
                     Columns = columns,
@@ -52,6 +52,8 @@ public static class InitializationCatalog
             });
         return result;
     }
+
+    public static string ReadTableName(string shape, long rows) => $"read_{shape.Trim().ToLowerInvariant()}_{rows}";
 
     public static IReadOnlyList<InitializationColumn> Columns(string shape) => shape switch
     {

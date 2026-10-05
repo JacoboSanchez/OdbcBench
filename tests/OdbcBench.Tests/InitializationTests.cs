@@ -101,6 +101,20 @@ public class InitializationTests
     }
 
     [Fact]
+    public void Insert_table_cannot_reuse_a_generated_read_table_name()
+    {
+        var c = BenchConfig.Parse("""{ "dsns": [ { "name": "a", "dsn": "A" } ] }""");
+        c.Initialize = new InitializeConfig { RowCounts = new() { 10_000 }, Shapes = new() { "wide" }, InsertTable = "READ_WIDE_10000" };
+        Assert.Contains(c.ValidateInitialization(), e => e.Contains("initialize.insertTable 'READ_WIDE_10000'"));
+
+        c.Initialize.CreateInsertTable = false;
+        Assert.Empty(c.ValidateInitialization());
+        c.Initialize.CreateInsertTable = true;
+        c.Initialize.InsertTable = "read_wide_100";
+        Assert.Empty(c.ValidateInitialization());
+    }
+
+    [Fact]
     public void Init_cli_overrides_row_counts_batch_size_and_existing_mode()
     {
         var o = CliOptions.Parse(new[] { "init", "-c", "b.json", "--rows", "100,2000", "--batch-size", "250", "--recreate", "--dsn", "a" });

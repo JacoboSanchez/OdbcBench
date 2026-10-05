@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using OdbcBench.Fetch;
+using OdbcBench.Initialize;
 using OdbcBench.Insert;
 using OdbcBench.Odbc;
 using OdbcBench.Validation;
@@ -342,6 +343,10 @@ public sealed partial class BenchConfig
             errors.Add("initialize.schema must be empty or a simple SQL identifier (letters, digits and underscore; not starting with a digit)");
         if (!IsSimpleIdentifier(init.InsertTable, allowEmpty: false))
             errors.Add("initialize.insertTable must be a simple SQL identifier");
+        // Case-insensitive: Oracle folds the generated names to upper case and SQL Server usually compares them that way.
+        else if (init.CreateInsertTable && init.Shapes.Any(shape => init.RowCounts.Any(rows => string.Equals(
+                     InitializationCatalog.ReadTableName(shape, rows), init.InsertTable.Trim(), StringComparison.OrdinalIgnoreCase))))
+            errors.Add($"initialize.insertTable '{init.InsertTable.Trim()}' is also the name of a generated read table");
         if (init.Existing.Trim().ToLowerInvariant() is not ("fail" or "recreate"))
             errors.Add("initialize.existing must be 'fail' or 'recreate'");
         if (init.RowCounts.Count == 0) errors.Add("initialize.rowCounts needs at least one value");
