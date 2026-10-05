@@ -338,7 +338,31 @@ public sealed partial class BenchConfig
                 errors.Add($"DSN '{d.Name}': either dsn or connectionString is required");
         }
 
-        var init = Initialize ?? new InitializeConfig();
+        ValidateInitializeSection(Initialize ?? new InitializeConfig(), errors);
+        if (LoginTimeoutSeconds < 0) errors.Add("loginTimeoutSeconds cannot be negative");
+        if (QueryTimeoutSeconds < 0) errors.Add("queryTimeoutSeconds cannot be negative");
+        if (MaxBoundBytes < 65536) errors.Add("maxBoundBytes is too small");
+        if (OdbcVersion.Trim() is not ("3.80" or "3.8" or "3.0" or "3")) errors.Add($"odbcVersion must be '3.80' or '3.0', not '{OdbcVersion}'");
+        return errors;
+    }
+
+    private static void ValidateInitializeSection(InitializeConfig init, List<string> errors)
+    {
+        // System.Text.Json stores an explicit JSON null even in these non-nullable properties. A helper call, unlike an
+        // "is null" test, leaves the compiler treating them as non-null after the early return below.
+        static bool Missing(object? value) => value is null;
+        var nulls = new List<string>();
+        if (Missing(init.Schema)) nulls.Add("schema");
+        if (Missing(init.Existing)) nulls.Add("existing");
+        if (init.CreateInsertTable && Missing(init.InsertTable)) nulls.Add("insertTable");
+        if (Missing(init.RowCounts)) nulls.Add("rowCounts");
+        if (Missing(init.Shapes) || init.Shapes.Any(Missing)) nulls.Add("shapes");
+        if (nulls.Count > 0)
+        {
+            errors.AddRange(nulls.Select(name => $"initialize.{name} cannot be null"));
+            return;
+        }
+
         if (!IsSimpleIdentifier(init.Schema, allowEmpty: true))
             errors.Add("initialize.schema must be empty or a simple SQL identifier (letters, digits and underscore; not starting with a digit)");
         if (init.CreateInsertTable)
@@ -363,11 +387,6 @@ public sealed partial class BenchConfig
             errors.Add("initialize.shapes contains duplicates");
         if (init.BatchSize < 1) errors.Add("initialize.batchSize must be at least 1");
         if (init.ValueLength is < 1 or > 4000) errors.Add("initialize.valueLength must be between 1 and 4000");
-        if (LoginTimeoutSeconds < 0) errors.Add("loginTimeoutSeconds cannot be negative");
-        if (QueryTimeoutSeconds < 0) errors.Add("queryTimeoutSeconds cannot be negative");
-        if (MaxBoundBytes < 65536) errors.Add("maxBoundBytes is too small");
-        if (OdbcVersion.Trim() is not ("3.80" or "3.8" or "3.0" or "3")) errors.Add($"odbcVersion must be '3.80' or '3.0', not '{OdbcVersion}'");
-        return errors;
     }
 
     private static bool IsSimpleIdentifier(string value, bool allowEmpty)

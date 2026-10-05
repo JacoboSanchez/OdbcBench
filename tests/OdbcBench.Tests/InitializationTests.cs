@@ -191,6 +191,21 @@ public class InitializationTests
     }
 
     [Fact]
+    public void Explicit_nulls_in_initialize_are_configuration_errors()
+    {
+        var c = BenchConfig.Parse("""
+            { "dsns": [ { "name": "a", "dsn": "A" } ],
+              "initialize": { "schema": null, "existing": null, "insertTable": null, "rowCounts": null, "shapes": [ "narrow", null ] } }
+            """);
+        var errors = c.ValidateInitialization();
+        foreach (string field in new[] { "schema", "existing", "insertTable", "rowCounts", "shapes" })
+            Assert.Contains($"initialize.{field} cannot be null", errors);
+
+        c.Initialize = new InitializeConfig { CreateInsertTable = false, InsertTable = null! }; // unused, so allowed
+        Assert.Empty(c.ValidateInitialization());
+    }
+
+    [Fact]
     public void Insert_table_cannot_reuse_a_generated_read_table_name()
     {
         var c = BenchConfig.Parse("""{ "dsns": [ { "name": "a", "dsn": "A" } ] }""");
