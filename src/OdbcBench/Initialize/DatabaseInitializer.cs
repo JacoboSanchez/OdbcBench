@@ -34,6 +34,7 @@ public sealed class DatabaseInitializer
         RequireFittingNames(_schema, tables, _dialect);
         EnsureSchema();
         RequireTableVisibility();
+        RequireNoConflictingObjects(tables);
 
         var existing = tables.Where(TableExists).ToList();
         if (existing.Count > 0 && !_options.Existing.Equals("recreate", StringComparison.OrdinalIgnoreCase))
@@ -53,12 +54,8 @@ public sealed class DatabaseInitializer
             Status($"Creating     {qualified} ({table.Shape}{(table.IsInsertTarget ? ", empty insert target" : $", {table.Rows.ToString("N0", CultureInfo.InvariantCulture)} rows")})");
             Execute(table.CreateSql(_dialect, _schema));
             if (!table.IsInsertTarget) Populate(table);
-            if (_options.CreateIndexes && !table.IsInsertTarget)
-            {
-                Execute(_dialect.CreateIndexSql(_schema, IndexName(table, "id"), qualified, "id", unique: true));
-                if (table.Columns.Any(c => c.Name == "category"))
-                    Execute(_dialect.CreateIndexSql(_schema, IndexName(table, "category"), qualified, "category", unique: false));
-            }
+            foreach (var (index, column, unique) in Indexes(table))
+                Execute(_dialect.CreateIndexSql(_schema, index, qualified, column, unique));
             if (_options.Analyze && !table.IsInsertTarget && _dialect.AnalyzeSql(_schema, table.Name) is string analyze)
                 Execute(analyze);
         }
@@ -92,6 +89,23 @@ public sealed class DatabaseInitializer
     {
         if (_dialect.TableVisibilitySql(_schema) is string sql && !QueryHasRows(sql))
             throw new InvalidOperationException($"{_dialect.Name} reports a table this account cannot read as missing, so init cannot tell which generated tables already exist in {(_schema.Length == 0 ? "the current schema" : $"schema {_dialect.Quote(_schema)}")}; connect as that schema's owner or grant SELECT ANY TABLE");
+    }
+
+    // Runs before any table is dropped, so --recreate cannot rebuild part of the dataset and then stop on a name it
+    // was never going to be able to use.
+    private void RequireNoConflictingObjects(IReadOnlyList<InitializationTable> tables)
+    {
+        var conflicts = new List<string>();
+        foreach (var table in tables)
+        {
+            if (QueryHasRows(_dialect.NonTableObjectSql(_schema, table.Name)))
+                conflicts.Add($"{table.QualifiedName(_dialect, _schema)} exists but is not a table");
+            foreach (var (index, _, _) in Indexes(table))
+                if (_dialect.ConflictingIndexSql(_schema, index, table.Name) is string sql && QueryHasRows(sql))
+                    conflicts.Add($"index name {_dialect.Qualify(_schema, index)} is already used by another object");
+        }
+        if (conflicts.Count > 0)
+            throw new InvalidOperationException("init will not replace objects it did not create: " + string.Join("; ", conflicts));
     }
 
     private void Populate(InitializationTable table)
@@ -176,6 +190,14 @@ public sealed class DatabaseInitializer
             throw;
         }
         finally { statement.TryCloseCursor(); }
+    }
+
+    private IEnumerable<(string Index, string Column, bool Unique)> Indexes(InitializationTable table)
+    {
+        if (!_options.CreateIndexes || table.IsInsertTarget) yield break;
+        yield return (IndexName(table, "id"), "id", true);
+        if (table.Columns.Any(c => c.Name == "category"))
+            yield return (IndexName(table, "category"), "category", false);
     }
 
     private string IndexName(InitializationTable table, string column) => _dialect.FitIdentifier($"ix_{table.Name}_{column}");

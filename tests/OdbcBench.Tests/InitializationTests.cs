@@ -112,6 +112,26 @@ public class InitializationTests
     }
 
     [Fact]
+    public void Name_conflicts_are_looked_up_in_each_dbms_catalog()
+    {
+        var postgres = SqlDialect.Detect("PostgreSQL");
+        Assert.EndsWith("n.nspname = 'bench' AND c.relname = 'read_narrow_10' AND c.relkind NOT IN ('r', 'p')",
+            postgres.NonTableObjectSql("bench", "read_narrow_10"));
+        Assert.Contains("n.nspname = current_schema()", postgres.NonTableObjectSql("", "read_narrow_10"));
+        Assert.Contains("t.relname = 'read_narrow_10'", postgres.ConflictingIndexSql("bench", "ix_read_narrow_10_id", "read_narrow_10"));
+
+        var sqlServer = SqlDialect.Detect("Microsoft SQL Server");
+        Assert.Contains("schema_id = SCHEMA_ID('bench') AND name = 'read_narrow_10' AND type <> 'U'", sqlServer.NonTableObjectSql("bench", "read_narrow_10"));
+        Assert.Contains("SCHEMA_ID()", sqlServer.NonTableObjectSql("", "read_narrow_10"));
+        Assert.Null(sqlServer.ConflictingIndexSql("bench", "ix_read_narrow_10_id", "read_narrow_10"));
+
+        var oracle = SqlDialect.Detect("Oracle");
+        Assert.Contains("FROM ALL_OBJECTS WHERE OWNER = UPPER('bench') AND OBJECT_NAME = UPPER('read_narrow_10')", oracle.NonTableObjectSql("bench", "read_narrow_10"));
+        Assert.Contains("NOT (TABLE_OWNER = UPPER('bench') AND TABLE_NAME = UPPER('read_narrow_10'))",
+            oracle.ConflictingIndexSql("bench", "ix_read_narrow_10_id", "read_narrow_10"));
+    }
+
+    [Fact]
     public void Oracle_trusts_a_missing_table_only_when_it_can_see_every_table_in_the_schema()
     {
         string? other = SqlDialect.Detect("Oracle").TableVisibilitySql("bench");

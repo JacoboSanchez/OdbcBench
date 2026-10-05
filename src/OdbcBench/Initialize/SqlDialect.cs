@@ -51,6 +51,13 @@ public abstract class SqlDialect
     /// the DBMS always reports a table the account cannot read as a permission error.
     /// </summary>
     public virtual string? TableVisibilitySql(string schema) => null;
+    /// <summary>Query that returns a row when an object other than a table already uses this table name.</summary>
+    public abstract string NonTableObjectSql(string schema, string table);
+    /// <summary>
+    /// Query that returns a row when this index name is already used by anything except an index on the given table,
+    /// or null when index names are scoped to their table and cannot collide.
+    /// </summary>
+    public abstract string? ConflictingIndexSql(string schema, string index, string table);
     public virtual string DropTableSql(string qualifiedTable) => $"DROP TABLE {qualifiedTable}";
     public string CreateIndexSql(string schema, string indexName, string qualifiedTable, string column, bool unique) =>
         $"CREATE {(unique ? "UNIQUE " : "")}INDEX {IndexReference(schema, indexName)} ON {qualifiedTable} ({Quote(column)})";
@@ -95,6 +102,14 @@ internal sealed class PostgreSqlDialect : SqlDialect
         SqlType.Binary => "BYTEA",
         _ => throw new ArgumentOutOfRangeException(nameof(type)),
     };
+    // pg_class lists every relation whatever the account's privileges; tables, views, sequences and indexes share names.
+    private static string RelationSql(string schema, string name) =>
+        "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+        $"WHERE n.nspname = {(schema.Length == 0 ? "current_schema()" : $"'{Literal(schema)}'")} AND c.relname = '{Literal(name)}'";
+    public override string NonTableObjectSql(string schema, string table) => RelationSql(schema, table) + " AND c.relkind NOT IN ('r', 'p')";
+    public override string? ConflictingIndexSql(string schema, string index, string table) =>
+        RelationSql(schema, index) + " AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid = i.indrelid " +
+        $"WHERE i.indexrelid = c.oid AND t.relname = '{Literal(table)}')";
     // psqlODBC passes the server's undefined_table state through.
     public override bool IsMissingTable(string? sqlState, int? nativeError) => sqlState == "42P01" || base.IsMissingTable(sqlState, nativeError);
     public override string? AnalyzeSql(string schema, string table) => $"ANALYZE {Qualify(schema, table)}";
@@ -124,6 +139,9 @@ internal sealed class SqlServerDialect : SqlDialect
         SqlType.Binary => $"VARBINARY({size})",
         _ => throw new ArgumentOutOfRangeException(nameof(type)),
     };
+    public override string NonTableObjectSql(string schema, string table) =>
+        $"SELECT 1 FROM sys.objects WHERE schema_id = SCHEMA_ID({(schema.Length == 0 ? "" : $"'{Literal(schema)}'")}) AND name = '{Literal(table)}' AND type <> 'U'";
+    public override string? ConflictingIndexSql(string schema, string index, string table) => null; // index names are unique per table only
     // Msg 208, "Invalid object name", whatever SQLSTATE the driver maps it to.
     public override bool IsMissingTable(string? sqlState, int? nativeError) => nativeError == 208 || base.IsMissingTable(sqlState, nativeError);
     public override string? AnalyzeSql(string schema, string table) => $"UPDATE STATISTICS {Qualify(schema, table)}";
@@ -164,7 +182,16 @@ internal sealed class OracleDialect : SqlDialect
     // ORA-00942 also hides a table the account may not read, so it means "missing" only to the schema's owner or to an
     // account with SELECT ANY TABLE, which init needs anyway to verify the rows it loads into another user's schema.
     public override string? TableVisibilitySql(string schema) =>
-        $"SELECT 1 FROM DUAL WHERE {(schema.Length == 0 ? "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" : $"UPPER('{Literal(schema)}')")} = SYS_CONTEXT('USERENV', 'SESSION_USER') " +
+        $"SELECT 1 FROM DUAL WHERE {Owner(schema)} = SYS_CONTEXT('USERENV', 'SESSION_USER') " +
         "OR EXISTS (SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE = 'SELECT ANY TABLE')";
+    // Tables share their namespace with these object types; indexes have a namespace of their own.
+    public override string NonTableObjectSql(string schema, string table) =>
+        $"SELECT 1 FROM ALL_OBJECTS WHERE OWNER = {Owner(schema)} AND OBJECT_NAME = UPPER('{Literal(table)}') " +
+        "AND OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'SEQUENCE', 'SYNONYM', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'TYPE')";
+    public override string? ConflictingIndexSql(string schema, string index, string table) =>
+        $"SELECT 1 FROM ALL_INDEXES WHERE OWNER = {Owner(schema)} AND INDEX_NAME = UPPER('{Literal(index)}') " +
+        $"AND NOT (TABLE_OWNER = {Owner(schema)} AND TABLE_NAME = UPPER('{Literal(table)}'))";
+    private static string Owner(string schema) =>
+        schema.Length == 0 ? "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" : $"UPPER('{Literal(schema)}')";
     public override string? AnalyzeSql(string schema, string table) => null;
 }
