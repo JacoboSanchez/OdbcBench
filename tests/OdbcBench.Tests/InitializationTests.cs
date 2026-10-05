@@ -137,7 +137,10 @@ public class InitializationTests
 
         c.Initialize.CreateInsertTable = false;
         Assert.Empty(c.ValidateInitialization());
+        c.Initialize.InsertTable = ""; // unused when no insert target is created
+        Assert.Empty(c.ValidateInitialization());
         c.Initialize.CreateInsertTable = true;
+        Assert.Contains(c.ValidateInitialization(), e => e.Contains("initialize.insertTable must be a simple SQL identifier"));
         c.Initialize.InsertTable = "read_wide_100";
         Assert.Empty(c.ValidateInitialization());
     }
