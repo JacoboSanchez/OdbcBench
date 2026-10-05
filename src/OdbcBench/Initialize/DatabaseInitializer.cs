@@ -160,6 +160,6 @@ public sealed class DatabaseInitializer
         finally { statement.TryCloseCursor(); }
     }
 
-    private static string IndexName(InitializationTable table, string column) => $"ix_{table.Name}_{column}";
+    private string IndexName(InitializationTable table, string column) => _dialect.FitIdentifier($"ix_{table.Name}_{column}");
     private void Status(string text) { if (!_quiet) _output.WriteLine(text); }
 }

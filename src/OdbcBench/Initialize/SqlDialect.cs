@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace OdbcBench.Initialize;
 
 /// <summary>Small DDL dialect used only to create the portable benchmark schema.</summary>
@@ -6,9 +9,26 @@ public abstract class SqlDialect
     public abstract string Name { get; }
     protected abstract string OpenQuote { get; }
     protected abstract string CloseQuote { get; }
+    /// <summary>Longest identifier, in bytes, that every supported server version accepts.</summary>
+    protected abstract int MaxIdentifierLength { get; }
 
     public virtual string Quote(string identifier) => OpenQuote + identifier.Replace(CloseQuote, CloseQuote + CloseQuote) + CloseQuote;
     public string Qualify(string schema, string table) => schema.Length == 0 ? Quote(table) : $"{Quote(schema)}.{Quote(table)}";
+
+    /// <summary>
+    /// Returns a generated name unchanged when it fits the identifier limit, otherwise a prefix plus a hash of the full
+    /// name, so long names stay valid, distinct and identical on every run.
+    /// </summary>
+    public string FitIdentifier(string name)
+    {
+        if (Encoding.UTF8.GetByteCount(name) <= MaxIdentifierLength) return name;
+        string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(name)), 0, 4).ToLowerInvariant();
+        int budget = MaxIdentifierLength - hash.Length - 1;
+        int keep = Math.Min(name.Length, budget);
+        while (keep > 0 && (Encoding.UTF8.GetByteCount(name.AsSpan(0, keep)) > budget || char.IsHighSurrogate(name[keep - 1])))
+            keep--;
+        return $"{name[..keep].TrimEnd('_')}_{hash}";
+    }
 
     public abstract string Type(SqlType type, int size = 0);
     public virtual string? SchemaExistsSql(string schema) =>
@@ -40,6 +60,7 @@ internal sealed class PostgreSqlDialect : SqlDialect
     public override string Name => "PostgreSQL";
     protected override string OpenQuote => "\"";
     protected override string CloseQuote => "\"";
+    protected override int MaxIdentifierLength => 63; // NAMEDATALEN - 1; longer names are silently truncated.
     public override string Type(SqlType type, int size = 0) => type switch
     {
         SqlType.SmallInt => "SMALLINT",
@@ -63,6 +84,7 @@ internal sealed class SqlServerDialect : SqlDialect
     public override string Name => "SQL Server";
     protected override string OpenQuote => "[";
     protected override string CloseQuote => "]";
+    protected override int MaxIdentifierLength => 128;
     public override string Type(SqlType type, int size = 0) => type switch
     {
         SqlType.SmallInt => "SMALLINT",
@@ -86,6 +108,8 @@ internal sealed class OracleDialect : SqlDialect
     public override string Name => "Oracle";
     protected override string OpenQuote => "\"";
     protected override string CloseQuote => "\"";
+    // 128 bytes from 12.2, but only when the database's COMPATIBLE setting is also 12.2 or later; 30 works everywhere.
+    protected override int MaxIdentifierLength => 30;
     // Unquoted Oracle identifiers fold to upper case. Generate conventional quoted names that remain addressable
     // through drivers which return upper-case metadata, even when the config used lower case.
     public override string Quote(string identifier) => base.Quote(identifier.ToUpperInvariant());

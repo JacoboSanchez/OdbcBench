@@ -153,10 +153,12 @@ The default size × shape matrix has 10,000-row and 1,000,000-row copies of each
 | `text` | Character conversion and bandwidth | 32, 128 and 512-character values |
 | `wide` | Application-like mixed rows | numeric, boolean, date/time, three text widths and binary |
 
-Every read table gets a unique index on `id`; tables with `category` also get a secondary index. Statistics are updated
-after loading where the dialect supports it. `insert_target` has the wide shape but starts empty and has no index, so it
-can be used by `OdbcBench insert`. Values are deterministic functions of the row number, just like the insert benchmark,
-and no server-specific data generator is used.
+Every read table gets a unique index on `id`; tables with `category` also get a secondary index. Indexes are named
+`ix_<table>_<column>`, shortened with a hash suffix when that exceeds the DBMS identifier limit (30 bytes on Oracle, so
+that databases whose `COMPATIBLE` setting is below 12.2 also work). Statistics are updated after loading where the
+dialect supports it. `insert_target` has the wide shape but starts empty and has no index, so it can be used by
+`OdbcBench insert`. Values are deterministic functions of the row number, just like the insert benchmark, and no
+server-specific data generator is used.
 
 Use `ORDER BY id` in read queries so driver validation and checksums see a stable order. For example:
 

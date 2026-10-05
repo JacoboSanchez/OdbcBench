@@ -36,6 +36,26 @@ public class InitializationTests
     }
 
     [Fact]
+    public void Generated_identifiers_are_shortened_only_past_the_dialect_limit()
+    {
+        var oracle = SqlDialect.Detect("Oracle");
+        Assert.Equal("ix_read_narrow_10000_category", oracle.FitIdentifier("ix_read_narrow_10000_category"));
+
+        // 31 bytes: rejected by Oracle databases whose COMPATIBLE setting is below 12.2.
+        string category = oracle.FitIdentifier("ix_read_narrow_1000000_category");
+        string id = oracle.FitIdentifier("ix_read_narrow_1000000_id_with_a_long_suffix");
+        Assert.Equal(30, category.Length);
+        Assert.Matches("^ix_read_narrow_100000_[0-9a-f]{8}$", category);
+        Assert.Equal(category, oracle.FitIdentifier("ix_read_narrow_1000000_category"));
+        Assert.NotEqual(category, id);
+        Assert.True(id.Length <= 30);
+
+        var postgres = SqlDialect.Detect("PostgreSQL");
+        Assert.Equal("ix_read_narrow_1000000_category", postgres.FitIdentifier("ix_read_narrow_1000000_category"));
+        Assert.Equal(63, postgres.FitIdentifier(new string('x', 64)).Length);
+    }
+
+    [Fact]
     public void Table_ddl_is_generated_from_logical_columns()
     {
         var d = SqlDialect.Detect("PostgreSQL");
