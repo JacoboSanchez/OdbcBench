@@ -68,6 +68,22 @@ public class InitializationTests
     }
 
     [Fact]
+    public void Table_names_must_fit_the_dialect_limit_before_anything_is_created()
+    {
+        var tables = InitializationCatalog.Build(new InitializeConfig
+        {
+            RowCounts = new() { 10 },
+            Shapes = new() { "narrow" },
+            InsertTable = "insert_target_with_a_31_byte_nm",
+        });
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            DatabaseInitializer.RequireFittingNames(tables, SqlDialect.Detect("Oracle")));
+        Assert.Contains("30-byte", error.Message);
+        Assert.EndsWith(": insert_target_with_a_31_byte_nm", error.Message);
+        DatabaseInitializer.RequireFittingNames(tables, SqlDialect.Detect("PostgreSQL"));
+    }
+
+    [Fact]
     public void Table_ddl_is_generated_from_logical_columns()
     {
         var d = SqlDialect.Detect("PostgreSQL");
