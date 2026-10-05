@@ -71,7 +71,7 @@ public sealed class DatabaseInitializer
     {
         var overlong = tables.Where(t => !dialect.FitsIdentifier(t.Name)).Select(t => t.Name).ToList();
         if (overlong.Count > 0)
-            throw new InvalidOperationException($"table name(s) longer than the {dialect.MaxIdentifierLength}-byte identifier limit init uses for {dialect.Name}: " +
+            throw new InvalidOperationException($"table name(s) longer than the {dialect.MaxIdentifierLength}-{dialect.IdentifierLengthUnit} identifier limit init uses for {dialect.Name}: " +
                 string.Join(", ", overlong));
     }
 

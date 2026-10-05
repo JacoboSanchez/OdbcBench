@@ -55,6 +55,12 @@ public class InitializationTests
         var postgres = SqlDialect.Detect("PostgreSQL");
         Assert.Equal("ix_read_narrow_1000000_category", postgres.FitIdentifier("ix_read_narrow_1000000_category"));
         Assert.Equal(63, postgres.FitIdentifier(new string('x', 64)).Length);
+
+        // PostgreSQL and Oracle limits are bytes; SQL Server's are characters.
+        string cjk = new string('表', 50); // 150 UTF-8 bytes
+        Assert.False(postgres.FitsIdentifier(cjk));
+        Assert.True(SqlDialect.Detect("Microsoft SQL Server").FitsIdentifier(cjk));
+        Assert.False(SqlDialect.Detect("Microsoft SQL Server").FitsIdentifier(new string('x', 129)));
     }
 
     [Theory]

@@ -9,13 +9,16 @@ public abstract class SqlDialect
     public abstract string Name { get; }
     protected abstract string OpenQuote { get; }
     protected abstract string CloseQuote { get; }
-    /// <summary>Longest identifier, in bytes, that every supported server version accepts.</summary>
+    /// <summary>Longest identifier, in <see cref="IdentifierLengthUnit"/>s, that every supported server version accepts.</summary>
     public abstract int MaxIdentifierLength { get; }
+    public virtual string IdentifierLengthUnit => "byte";
+    // UTF-8 bytes, the usual server encoding for limits that PostgreSQL and Oracle state in bytes.
+    protected virtual int IdentifierLength(ReadOnlySpan<char> name) => Encoding.UTF8.GetByteCount(name);
 
     public virtual string Quote(string identifier) => OpenQuote + identifier.Replace(CloseQuote, CloseQuote + CloseQuote) + CloseQuote;
     public string Qualify(string schema, string table) => schema.Length == 0 ? Quote(table) : $"{Quote(schema)}.{Quote(table)}";
 
-    public bool FitsIdentifier(string name) => Encoding.UTF8.GetByteCount(name) <= MaxIdentifierLength;
+    public bool FitsIdentifier(string name) => IdentifierLength(name) <= MaxIdentifierLength;
 
     /// <summary>
     /// Returns a generated name unchanged when it fits the identifier limit, otherwise a prefix plus a hash of the full
@@ -27,7 +30,7 @@ public abstract class SqlDialect
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(name)), 0, 4).ToLowerInvariant();
         int budget = MaxIdentifierLength - hash.Length - 1;
         int keep = Math.Min(name.Length, budget);
-        while (keep > 0 && (Encoding.UTF8.GetByteCount(name.AsSpan(0, keep)) > budget || char.IsHighSurrogate(name[keep - 1])))
+        while (keep > 0 && (IdentifierLength(name.AsSpan(0, keep)) > budget || char.IsHighSurrogate(name[keep - 1])))
             keep--;
         return $"{name[..keep].TrimEnd('_')}_{hash}";
     }
@@ -91,6 +94,9 @@ internal sealed class SqlServerDialect : SqlDialect
     protected override string OpenQuote => "[";
     protected override string CloseQuote => "]";
     public override int MaxIdentifierLength => 128;
+    // sysname is nvarchar(128): the limit counts UTF-16 characters, not bytes.
+    public override string IdentifierLengthUnit => "character";
+    protected override int IdentifierLength(ReadOnlySpan<char> name) => name.Length;
     public override string Type(SqlType type, int size = 0) => type switch
     {
         SqlType.SmallInt => "SMALLINT",
