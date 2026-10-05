@@ -364,11 +364,11 @@ public sealed partial class BenchConfig
         }
 
         if (!IsSimpleIdentifier(init.Schema, allowEmpty: true))
-            errors.Add("initialize.schema must be empty or a simple SQL identifier (letters, digits and underscore; not starting with a digit)");
+            errors.Add("initialize.schema must be empty or a simple SQL identifier (ASCII letters, digits and underscore; not starting with a digit)");
         if (init.CreateInsertTable)
         {
             if (!IsSimpleIdentifier(init.InsertTable, allowEmpty: false))
-                errors.Add("initialize.insertTable must be a simple SQL identifier");
+                errors.Add("initialize.insertTable must be a simple SQL identifier (ASCII letters, digits and underscore; not starting with a digit)");
             // Case-insensitive: Oracle folds the generated names to upper case and SQL Server usually compares them that way.
             else if (init.Shapes.Any(shape => init.RowCounts.Any(rows => string.Equals(
                          InitializationCatalog.ReadTableName(shape, rows), init.InsertTable.Trim(), StringComparison.OrdinalIgnoreCase))))
@@ -389,12 +389,14 @@ public sealed partial class BenchConfig
         if (init.ValueLength is < 1 or > 4000) errors.Add("initialize.valueLength must be between 1 and 4000");
     }
 
+    // ASCII only: then every generated name has as many bytes as characters in any server encoding, which is what the
+    // dialects' identifier limits are checked against.
     private static bool IsSimpleIdentifier(string value, bool allowEmpty)
     {
         value = value.Trim();
         if (value.Length == 0) return allowEmpty;
-        if (!(char.IsLetter(value[0]) || value[0] == '_')) return false;
-        return value.All(c => char.IsLetterOrDigit(c) || c == '_');
+        if (!(char.IsAsciiLetter(value[0]) || value[0] == '_')) return false;
+        return value.All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
     }
 
     /// <summary>Fills ResolvedPassword for every enabled DSN: pwd, then pwdEnv, then the prompt callback.</summary>

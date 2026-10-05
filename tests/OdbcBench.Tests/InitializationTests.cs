@@ -187,6 +187,10 @@ public class InitializationTests
         Assert.Contains(errors, e => e.Contains("unknown shape"));
         Assert.Contains(errors, e => e.Contains("batchSize"));
         Assert.Contains(errors, e => e.Contains("valueLength"));
+
+        // A 40-character é schema is 40 bytes in LATIN1 but 80 in UTF-8; ASCII names are the same length everywhere.
+        c.Initialize = new InitializeConfig { Schema = new string('é', 40) };
+        Assert.Contains(c.ValidateInitialization(), e => e.Contains("initialize.schema") && e.Contains("ASCII"));
     }
 
     [Fact]
