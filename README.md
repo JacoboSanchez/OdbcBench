@@ -184,7 +184,10 @@ the driver's chunked long-value path.
 | `createIndexes` | `true` | Create the read-table indexes after loading. |
 | `analyze` | `true` | Update optimizer statistics (PostgreSQL and SQL Server). |
 | `createInsertTable` | `true` | Also create an empty mixed-type insert target. |
-| `insertTable` | `insert_target` | Name of that insert target inside `schema`; at most 30 bytes on Oracle. |
+| `insertTable` | `insert_target` | Name of that insert target inside `schema`. |
+
+Before it creates anything, init checks `schema` and every table name against the DBMS identifier limit: 30 bytes on
+Oracle, 63 bytes on PostgreSQL and 128 characters on SQL Server.
 
 Initialization is intentionally safe by default: it never drops an object without `existing: "recreate"` or
 `--recreate`, and it only manages its known table names. DDL is committed table by table because Oracle implicitly

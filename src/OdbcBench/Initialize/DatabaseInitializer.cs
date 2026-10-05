@@ -31,7 +31,7 @@ public sealed class DatabaseInitializer
     public IReadOnlyList<InitializationTable> Run()
     {
         var tables = InitializationCatalog.Build(_options);
-        RequireFittingNames(tables, _dialect);
+        RequireFittingNames(_schema, tables, _dialect);
         EnsureSchema();
 
         var existing = tables.Where(TableExists).ToList();
@@ -66,12 +66,13 @@ public sealed class DatabaseInitializer
 
     public string DialectName => _dialect.Name;
 
-    // Checked before anything is created: the insert target comes last, after every read table has been loaded.
-    internal static void RequireFittingNames(IEnumerable<InitializationTable> tables, SqlDialect dialect)
+    // Checked before anything is created: the insert target comes last, after every read table has been loaded, and
+    // PostgreSQL silently truncates an overlong schema, which the next run's existence check would then miss.
+    internal static void RequireFittingNames(string schema, IEnumerable<InitializationTable> tables, SqlDialect dialect)
     {
-        var overlong = tables.Where(t => !dialect.FitsIdentifier(t.Name)).Select(t => t.Name).ToList();
+        var overlong = tables.Select(t => t.Name).Prepend(schema).Where(name => !dialect.FitsIdentifier(name)).ToList();
         if (overlong.Count > 0)
-            throw new InvalidOperationException($"table name(s) longer than the {dialect.MaxIdentifierLength}-{dialect.IdentifierLengthUnit} identifier limit init uses for {dialect.Name}: " +
+            throw new InvalidOperationException($"name(s) longer than the {dialect.MaxIdentifierLength}-{dialect.IdentifierLengthUnit} identifier limit init uses for {dialect.Name}: " +
                 string.Join(", ", overlong));
     }
 

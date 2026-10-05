@@ -74,7 +74,7 @@ public class InitializationTests
     }
 
     [Fact]
-    public void Table_names_must_fit_the_dialect_limit_before_anything_is_created()
+    public void Schema_and_table_names_must_fit_the_dialect_limit_before_anything_is_created()
     {
         var tables = InitializationCatalog.Build(new InitializeConfig
         {
@@ -83,10 +83,17 @@ public class InitializationTests
             InsertTable = "insert_target_with_a_31_byte_nm",
         });
         var error = Assert.Throws<InvalidOperationException>(() =>
-            DatabaseInitializer.RequireFittingNames(tables, SqlDialect.Detect("Oracle")));
+            DatabaseInitializer.RequireFittingNames("bench", tables, SqlDialect.Detect("Oracle")));
         Assert.Contains("30-byte", error.Message);
         Assert.EndsWith(": insert_target_with_a_31_byte_nm", error.Message);
-        DatabaseInitializer.RequireFittingNames(tables, SqlDialect.Detect("PostgreSQL"));
+        DatabaseInitializer.RequireFittingNames("bench", tables, SqlDialect.Detect("PostgreSQL"));
+        DatabaseInitializer.RequireFittingNames("", tables, SqlDialect.Detect("PostgreSQL")); // the connection's default schema
+
+        // PostgreSQL would create a 64-byte schema truncated to 63 bytes, which the next run could not find.
+        string schema = new string('s', 64);
+        error = Assert.Throws<InvalidOperationException>(() =>
+            DatabaseInitializer.RequireFittingNames(schema, tables, SqlDialect.Detect("PostgreSQL")));
+        Assert.EndsWith($": {schema}", error.Message);
     }
 
     [Fact]
