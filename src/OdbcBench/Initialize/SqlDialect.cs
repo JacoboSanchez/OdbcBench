@@ -61,6 +61,10 @@ public abstract class SqlDialect
     /// or null when index names are scoped to their table and cannot collide.
     /// </summary>
     public abstract string? ConflictingIndexSql(string schema, string index, string table);
+    /// <summary>Query that returns a row when the account may not drop this existing table, or null when it always may.</summary>
+    public abstract string? CannotDropTableSql(string schema, string table);
+    /// <summary>Query that returns a row when the account may create tables in the schema.</summary>
+    public abstract string CanCreateTablesSql(string schema);
     public virtual string DropTableSql(string qualifiedTable) => $"DROP TABLE {qualifiedTable}";
     public string CreateIndexSql(string schema, string indexName, string qualifiedTable, string column, bool unique) =>
         $"CREATE {(unique ? "UNIQUE " : "")}INDEX {IndexReference(schema, indexName)} ON {qualifiedTable} ({Quote(column)})";
@@ -109,11 +113,16 @@ internal sealed class PostgreSqlDialect : SqlDialect
     // pg_class lists every relation whatever the account's privileges; tables, views, sequences and indexes share names.
     private static string RelationSql(string schema, string name) =>
         "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
-        $"WHERE n.nspname = {(schema.Length == 0 ? "current_schema()" : $"'{Literal(schema)}'")} AND c.relname = '{Literal(name)}'";
+        $"WHERE n.nspname = {SchemaName(schema)} AND c.relname = '{Literal(name)}'";
+    private static string SchemaName(string schema) => schema.Length == 0 ? "current_schema()" : $"'{Literal(schema)}'";
     public override string NonTableObjectSql(string schema, string table) => RelationSql(schema, table) + " AND c.relkind NOT IN ('r', 'p')";
     public override string? ConflictingIndexSql(string schema, string index, string table) =>
         RelationSql(schema, index) + " AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid = i.indrelid " +
         $"WHERE i.indexrelid = c.oid AND t.relname = '{Literal(table)}')";
+    // Only members of the role owning the table or its schema (or a superuser) may drop it.
+    public override string? CannotDropTableSql(string schema, string table) => RelationSql(schema, table) +
+        " AND NOT pg_catalog.pg_has_role(c.relowner, 'USAGE') AND NOT pg_catalog.pg_has_role(n.nspowner, 'USAGE')";
+    public override string CanCreateTablesSql(string schema) => $"SELECT 1 WHERE pg_catalog.has_schema_privilege({SchemaName(schema)}, 'CREATE')";
     // psqlODBC passes the server's undefined_table state through.
     public override bool IsMissingTable(string? sqlState, int? nativeError) => sqlState == "42P01" || base.IsMissingTable(sqlState, nativeError);
     public override string? AnalyzeSql(string schema, string table) => $"ANALYZE {Qualify(schema, table)}";
@@ -147,6 +156,14 @@ internal sealed class SqlServerDialect : SqlDialect
     public override string NonTableObjectSql(string schema, string table) =>
         $"SELECT 1 FROM sys.objects WHERE schema_id = SCHEMA_ID({(schema.Length == 0 ? "" : $"'{Literal(schema)}'")}) AND name = '{Literal(table)}' AND type <> 'U'";
     public override string? ConflictingIndexSql(string schema, string index, string table) => null; // index names are unique per table only
+    // DROP TABLE needs ALTER on the schema or CONTROL on the table; CREATE TABLE needs the database permission and
+    // ALTER on the schema. HAS_PERMS_BY_NAME includes permissions implied by roles such as db_ddladmin.
+    public override string? CannotDropTableSql(string schema, string table) =>
+        $"SELECT 1 WHERE HAS_PERMS_BY_NAME({SchemaName(schema)}, 'SCHEMA', 'ALTER') = 0 " +
+        $"AND HAS_PERMS_BY_NAME('{Literal(schema.Length == 0 ? Quote(table) : Qualify(schema, table))}', 'OBJECT', 'CONTROL') = 0";
+    public override string CanCreateTablesSql(string schema) =>
+        $"SELECT 1 WHERE HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CREATE TABLE') = 1 AND HAS_PERMS_BY_NAME({SchemaName(schema)}, 'SCHEMA', 'ALTER') = 1";
+    private static string SchemaName(string schema) => schema.Length == 0 ? "SCHEMA_NAME()" : $"'{Literal(schema)}'";
     // Msg 208, "Invalid object name", whatever SQLSTATE the driver maps it to.
     public override bool IsMissingTable(string? sqlState, int? nativeError) => nativeError == 208 || base.IsMissingTable(sqlState, nativeError);
     public override string? AnalyzeSql(string schema, string table) => $"UPDATE STATISTICS {Qualify(schema, table)}";
@@ -197,6 +214,9 @@ internal sealed class OracleDialect : SqlDialect
     public override string? ConflictingIndexSql(string schema, string index, string table) =>
         $"SELECT 1 FROM ALL_INDEXES WHERE OWNER = {Owner(schema)} AND INDEX_NAME = UPPER('{Literal(index)}') " +
         $"AND NOT (TABLE_OWNER = {Owner(schema)} AND TABLE_NAME = UPPER('{Literal(table)}'))";
+    public override string? CannotDropTableSql(string schema, string table) => null; // init only runs as the schema's owner
+    public override string CanCreateTablesSql(string schema) =>
+        "SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE IN ('CREATE TABLE', 'CREATE ANY TABLE')";
     private static string Owner(string schema) =>
         schema.Length == 0 ? "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" : $"UPPER('{Literal(schema)}')";
     public override string? AnalyzeSql(string schema, string table) => null;

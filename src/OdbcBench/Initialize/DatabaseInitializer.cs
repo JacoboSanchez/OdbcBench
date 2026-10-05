@@ -43,6 +43,7 @@ public sealed class DatabaseInitializer
             throw new InvalidOperationException("generated table(s) already exist: " +
                 string.Join(", ", existing.Select(t => t.QualifiedName(_dialect, _schema))) +
                 "; set initialize.existing to 'recreate' or pass --recreate to replace them");
+        RequireDdlRights(existing);
 
         foreach (var table in existing.AsEnumerable().Reverse())
         {
@@ -133,6 +134,20 @@ public sealed class DatabaseInitializer
         }
         if (conflicts.Count > 0)
             throw new InvalidOperationException("init will not replace objects it did not create: " + string.Join("; ", conflicts));
+    }
+
+    // --recreate drops every existing table before it creates any, so a table the account may not drop, or a schema it
+    // may not create in, would otherwise stop init only after part of the dataset was gone.
+    private void RequireDdlRights(IEnumerable<InitializationTable> existing)
+    {
+        var problems = existing
+            .Where(t => _dialect.CannotDropTableSql(_schema, t.Name) is string sql && QueryHasRows(sql))
+            .Select(t => $"may not drop {t.QualifiedName(_dialect, _schema)}")
+            .ToList();
+        if (!QueryHasRows(_dialect.CanCreateTablesSql(_schema)))
+            problems.Add($"may not create tables in schema {_dialect.Quote(_schema)}");
+        if (problems.Count > 0)
+            throw new InvalidOperationException($"this account {string.Join("; ", problems)}; init stopped before changing anything");
     }
 
     private void Populate(InitializationTable table)

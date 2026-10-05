@@ -141,6 +141,24 @@ public class InitializationTests
     }
 
     [Fact]
+    public void Drop_and_create_rights_are_checked_in_each_dbms()
+    {
+        var postgres = SqlDialect.Detect("PostgreSQL");
+        Assert.EndsWith("AND NOT pg_catalog.pg_has_role(c.relowner, 'USAGE') AND NOT pg_catalog.pg_has_role(n.nspowner, 'USAGE')",
+            postgres.CannotDropTableSql("bench", "read_narrow_10"));
+        Assert.Equal("SELECT 1 WHERE pg_catalog.has_schema_privilege('bench', 'CREATE')", postgres.CanCreateTablesSql("bench"));
+
+        var sqlServer = SqlDialect.Detect("Microsoft SQL Server");
+        Assert.Equal("SELECT 1 WHERE HAS_PERMS_BY_NAME('bench', 'SCHEMA', 'ALTER') = 0 AND HAS_PERMS_BY_NAME('[bench].[read_narrow_10]', 'OBJECT', 'CONTROL') = 0",
+            sqlServer.CannotDropTableSql("bench", "read_narrow_10"));
+        Assert.Contains("HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CREATE TABLE') = 1", sqlServer.CanCreateTablesSql("bench"));
+
+        var oracle = SqlDialect.Detect("Oracle");
+        Assert.Null(oracle.CannotDropTableSql("bench", "read_narrow_10")); // only the owner gets this far
+        Assert.Contains("'CREATE TABLE'", oracle.CanCreateTablesSql("bench"));
+    }
+
+    [Fact]
     public void Oracle_init_requires_the_login_user_to_own_the_schema()
     {
         // Neither ORA-00942 nor ALL_OBJECTS can be trusted for another user's schema, even with SELECT ANY TABLE.
