@@ -41,6 +41,11 @@ public abstract class SqlDialect
     public virtual string? CreateSchemaSql(string schema) => schema.Length == 0 ? null : $"CREATE SCHEMA {Quote(schema)}";
     // Names no column, so a table with a generated name but a different layout still counts as existing.
     public virtual string TableProbeSql(string qualifiedTable) => $"SELECT 1 FROM {qualifiedTable} WHERE 1 = 0";
+    /// <summary>
+    /// True when a failed <see cref="TableProbeSql"/> means the table does not exist. Any other failure, such as a
+    /// permission error, must stop init before --recreate drops the tables it did find.
+    /// </summary>
+    public virtual bool IsMissingTable(string? sqlState, int? nativeError) => sqlState is "42S02" or "S0002";
     public virtual string DropTableSql(string qualifiedTable) => $"DROP TABLE {qualifiedTable}";
     public string CreateIndexSql(string schema, string indexName, string qualifiedTable, string column, bool unique) =>
         $"CREATE {(unique ? "UNIQUE " : "")}INDEX {IndexReference(schema, indexName)} ON {qualifiedTable} ({Quote(column)})";
@@ -85,6 +90,8 @@ internal sealed class PostgreSqlDialect : SqlDialect
         SqlType.Binary => "BYTEA",
         _ => throw new ArgumentOutOfRangeException(nameof(type)),
     };
+    // psqlODBC passes the server's undefined_table state through.
+    public override bool IsMissingTable(string? sqlState, int? nativeError) => sqlState == "42P01" || base.IsMissingTable(sqlState, nativeError);
     public override string? AnalyzeSql(string schema, string table) => $"ANALYZE {Qualify(schema, table)}";
 }
 
@@ -112,6 +119,8 @@ internal sealed class SqlServerDialect : SqlDialect
         SqlType.Binary => $"VARBINARY({size})",
         _ => throw new ArgumentOutOfRangeException(nameof(type)),
     };
+    // Msg 208, "Invalid object name", whatever SQLSTATE the driver maps it to.
+    public override bool IsMissingTable(string? sqlState, int? nativeError) => nativeError == 208 || base.IsMissingTable(sqlState, nativeError);
     public override string? AnalyzeSql(string schema, string table) => $"UPDATE STATISTICS {Qualify(schema, table)}";
 }
 
@@ -145,5 +154,7 @@ internal sealed class OracleDialect : SqlDialect
     public override string? SchemaExistsSql(string schema) => schema.Length == 0 ? null
         : $"SELECT 1 FROM ALL_USERS WHERE USERNAME = UPPER('{Literal(schema)}')";
     public override string? CreateSchemaSql(string schema) => null; // Oracle schemas are users and cannot be created as ordinary namespaces.
+    // ORA-00942, "table or view does not exist", whatever SQLSTATE the driver maps it to.
+    public override bool IsMissingTable(string? sqlState, int? nativeError) => nativeError == 942 || base.IsMissingTable(sqlState, nativeError);
     public override string? AnalyzeSql(string schema, string table) => null;
 }

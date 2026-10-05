@@ -126,7 +126,7 @@ public sealed class DatabaseInitializer
             statement.ExecDirect(_dialect.TableProbeSql(table.QualifiedName(_dialect, _schema)));
             return true;
         }
-        catch (OdbcException ex) when (ex.SqlState is { } state && (state.StartsWith("42", StringComparison.Ordinal) || state == "S0002"))
+        catch (OdbcException ex) when (_dialect.IsMissingTable(ex.SqlState, ex.NativeError))
         {
             return false;
         }

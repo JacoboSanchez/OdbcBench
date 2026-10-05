@@ -96,6 +96,21 @@ public class InitializationTests
         Assert.EndsWith($": {schema}", error.Message);
     }
 
+    [Theory]
+    [InlineData("PostgreSQL", "42P01", 7, true)]
+    [InlineData("PostgreSQL", "42S02", 0, true)]
+    [InlineData("PostgreSQL", "42501", 7, false)] // insufficient_privilege on a table that exists
+    [InlineData("Microsoft SQL Server", "42S02", 208, true)]
+    [InlineData("Microsoft SQL Server", "42000", 208, true)]
+    [InlineData("Microsoft SQL Server", "42000", 229, false)] // SELECT permission denied
+    [InlineData("Oracle", "42S02", 942, true)]
+    [InlineData("Oracle", "42000", 942, true)]
+    [InlineData("Oracle", "42000", 1031, false)] // ORA-01031 insufficient privileges
+    public void Only_missing_table_errors_mean_a_table_is_absent(string dbms, string state, int native, bool missing)
+    {
+        Assert.Equal(missing, SqlDialect.Detect(dbms).IsMissingTable(state, native));
+    }
+
     [Fact]
     public void Table_ddl_is_generated_from_logical_columns()
     {
