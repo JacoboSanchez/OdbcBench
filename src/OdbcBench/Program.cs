@@ -214,7 +214,7 @@ internal static class Program
             Console.WriteLine();
             Console.WriteLine($"Initialized  : {reads.Count} read tables, {reads.Sum(t => t.Rows):N0} rows" + (insert == null ? "" : ", 1 empty insert target"));
             if (insert != null)
-                Console.WriteLine($"Insert table : {(config.Initialize?.Schema?.Trim() is { Length: > 0 } s ? s + "." : "")}{insert.Name}");
+                Console.WriteLine($"Insert table : {initializer.Schema}.{insert.Name}");
             Console.WriteLine("Use ORDER BY id for deterministic read validation; select one generated read_<shape>_<rows> table in query.");
             return 0;
         }

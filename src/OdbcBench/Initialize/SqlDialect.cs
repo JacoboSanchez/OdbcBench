@@ -35,6 +35,8 @@ public abstract class SqlDialect
         return $"{name[..keep].TrimEnd('_')}_{hash}";
     }
 
+    /// <summary>Returns the schema that one-part names create objects in.</summary>
+    public abstract string CurrentSchemaSql { get; }
     public abstract string Type(SqlType type, int size = 0);
     public virtual string? SchemaExistsSql(string schema) =>
         $"SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = '{Literal(schema)}'";
@@ -88,6 +90,7 @@ internal sealed class PostgreSqlDialect : SqlDialect
     protected override string OpenQuote => "\"";
     protected override string CloseQuote => "\"";
     public override int MaxIdentifierLength => 63; // NAMEDATALEN - 1; longer names are silently truncated.
+    public override string CurrentSchemaSql => "SELECT current_schema()";
     public override string Type(SqlType type, int size = 0) => type switch
     {
         SqlType.SmallInt => "SMALLINT",
@@ -125,6 +128,7 @@ internal sealed class SqlServerDialect : SqlDialect
     // sysname is nvarchar(128): the limit counts UTF-16 characters, not bytes.
     public override string IdentifierLengthUnit => "character";
     protected override int IdentifierLength(ReadOnlySpan<char> name) => name.Length;
+    public override string CurrentSchemaSql => "SELECT SCHEMA_NAME()";
     public override string Type(SqlType type, int size = 0) => type switch
     {
         SqlType.SmallInt => "SMALLINT",
@@ -155,6 +159,7 @@ internal sealed class OracleDialect : SqlDialect
     protected override string CloseQuote => "\"";
     // 128 bytes from 12.2, but only when the database's COMPATIBLE setting is also 12.2 or later; 30 works everywhere.
     public override int MaxIdentifierLength => 30;
+    public override string CurrentSchemaSql => "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL";
     // Unquoted Oracle identifiers fold to upper case. Generate conventional quoted names that remain addressable
     // through drivers which return upper-case metadata, even when the config used lower case.
     public override string Quote(string identifier) => base.Quote(identifier.ToUpperInvariant());

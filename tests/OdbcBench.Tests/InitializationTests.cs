@@ -131,6 +131,15 @@ public class InitializationTests
             oracle.ConflictingIndexSql("bench", "ix_read_narrow_10_id", "read_narrow_10"));
     }
 
+    [Theory]
+    [InlineData("PostgreSQL", "SELECT current_schema()")]
+    [InlineData("Microsoft SQL Server", "SELECT SCHEMA_NAME()")]
+    [InlineData("Oracle", "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")]
+    public void An_empty_schema_is_resolved_to_the_current_one(string dbms, string sql)
+    {
+        Assert.Equal(sql, SqlDialect.Detect(dbms).CurrentSchemaSql);
+    }
+
     [Fact]
     public void Oracle_init_requires_the_login_user_to_own_the_schema()
     {

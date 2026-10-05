@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using OdbcBench.Config;
+using OdbcBench.Fetch;
 using OdbcBench.Insert;
 using OdbcBench.Odbc;
 
@@ -15,7 +16,7 @@ public sealed class DatabaseInitializer
     private readonly SqlDialect _dialect;
     private readonly TextWriter _output;
     private readonly bool _quiet;
-    private readonly string _schema;
+    private string _schema;
 
     public DatabaseInitializer(BenchConfig config, OdbcConnection connection, TextWriter output, bool quiet)
     {
@@ -31,6 +32,7 @@ public sealed class DatabaseInitializer
     public IReadOnlyList<InitializationTable> Run()
     {
         var tables = InitializationCatalog.Build(_options);
+        if (_schema.Length == 0) _schema = CurrentSchema();
         RequireFittingNames(_schema, tables, _dialect);
         EnsureSchema();
         RequireTableVisibility();
@@ -63,6 +65,31 @@ public sealed class DatabaseInitializer
     }
 
     public string DialectName => _dialect.Name;
+    /// <summary>The schema that holds the generated tables; resolved by <see cref="Run"/> when none was configured.</summary>
+    public string Schema => _schema;
+
+    // One-part names would let PostgreSQL's search_path or SQL Server's dbo fallback resolve a probe or a DROP to a
+    // table in another schema, so an empty schema is resolved once and every statement is qualified with it.
+    private string CurrentSchema()
+    {
+        using var statement = new OdbcStatement(_connection);
+        using var reader = new GetDataReader(1024);
+        try
+        {
+            statement.ExecDirect(_dialect.CurrentSchemaSql);
+            short rc = statement.Fetch();
+            if (rc == Native.SQL_ERROR || rc == Native.SQL_INVALID_HANDLE)
+                throw new OdbcException("SQLFetch", rc, statement.DrainDiagnostics());
+            string? schema = rc == Native.SQL_NO_DATA ? null : reader.ReadText(statement, 1)?.Trim();
+            return schema is { Length: > 0 } ? schema
+                : throw new InvalidOperationException($"the connection has no current schema ('{_dialect.CurrentSchemaSql}' returned none); set initialize.schema");
+        }
+        finally
+        {
+            statement.TryCloseCursor();
+            _connection.TryRollback();
+        }
+    }
 
     // Checked before anything is created: the insert target comes last, after every read table has been loaded, and
     // PostgreSQL silently truncates an overlong schema, which the next run's existence check would then miss.
