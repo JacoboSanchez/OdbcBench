@@ -88,7 +88,7 @@ public sealed class DatabaseInitializer
     private void RequireTableVisibility()
     {
         if (_dialect.TableVisibilitySql(_schema) is string sql && !QueryHasRows(sql))
-            throw new InvalidOperationException($"{_dialect.Name} reports a table this account cannot read as missing, so init cannot tell which generated tables already exist in {(_schema.Length == 0 ? "the current schema" : $"schema {_dialect.Quote(_schema)}")}; connect as that schema's owner or grant SELECT ANY TABLE");
+            throw new InvalidOperationException($"{_dialect.Name} hides objects this account cannot read, so init only manages a schema owned by the login user; connect as the owner of {(_schema.Length == 0 ? "the current schema" : $"schema {_dialect.Quote(_schema)}")}");
     }
 
     // Runs before any table is dropped, so --recreate cannot rebuild part of the dataset and then stop on a name it

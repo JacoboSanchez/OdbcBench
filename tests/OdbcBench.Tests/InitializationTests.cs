@@ -132,13 +132,12 @@ public class InitializationTests
     }
 
     [Fact]
-    public void Oracle_trusts_a_missing_table_only_when_it_can_see_every_table_in_the_schema()
+    public void Oracle_init_requires_the_login_user_to_own_the_schema()
     {
-        string? other = SqlDialect.Detect("Oracle").TableVisibilitySql("bench");
-        Assert.NotNull(other);
-        Assert.Contains("UPPER('bench') = SYS_CONTEXT('USERENV', 'SESSION_USER')", other);
-        Assert.Contains("PRIVILEGE = 'SELECT ANY TABLE'", other);
-        Assert.Contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') = SYS_CONTEXT('USERENV', 'SESSION_USER')",
+        // Neither ORA-00942 nor ALL_OBJECTS can be trusted for another user's schema, even with SELECT ANY TABLE.
+        Assert.Equal("SELECT 1 FROM DUAL WHERE UPPER('bench') = SYS_CONTEXT('USERENV', 'SESSION_USER')",
+            SqlDialect.Detect("Oracle").TableVisibilitySql("bench"));
+        Assert.Equal("SELECT 1 FROM DUAL WHERE SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') = SYS_CONTEXT('USERENV', 'SESSION_USER')",
             SqlDialect.Detect("Oracle").TableVisibilitySql(""));
         // PostgreSQL and SQL Server report a table the account cannot read as a permission error, not as missing.
         Assert.Null(SqlDialect.Detect("PostgreSQL").TableVisibilitySql("bench"));

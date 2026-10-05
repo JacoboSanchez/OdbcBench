@@ -47,8 +47,9 @@ public abstract class SqlDialect
     /// </summary>
     public virtual bool IsMissingTable(string? sqlState, int? nativeError) => sqlState is "42S02" or "S0002";
     /// <summary>
-    /// Query that returns a row when <see cref="IsMissingTable"/> can be trusted for tables in the schema, or null when
-    /// the DBMS always reports a table the account cannot read as a permission error.
+    /// Query that returns a row when the account sees every object in the schema, so that <see cref="IsMissingTable"/>
+    /// and the catalog conflict checks can be trusted; null when the DBMS reports an unreadable table as a permission
+    /// error and lists every relation whatever the account's privileges.
     /// </summary>
     public virtual string? TableVisibilitySql(string schema) => null;
     /// <summary>Query that returns a row when an object other than a table already uses this table name.</summary>
@@ -179,11 +180,11 @@ internal sealed class OracleDialect : SqlDialect
     public override string? CreateSchemaSql(string schema) => null; // Oracle schemas are users and cannot be created as ordinary namespaces.
     // ORA-00942, "table or view does not exist", whatever SQLSTATE the driver maps it to.
     public override bool IsMissingTable(string? sqlState, int? nativeError) => nativeError == 942 || base.IsMissingTable(sqlState, nativeError);
-    // ORA-00942 also hides a table the account may not read, so it means "missing" only to the schema's owner or to an
-    // account with SELECT ANY TABLE, which init needs anyway to verify the rows it loads into another user's schema.
+    // ORA-00942 also hides a table the account may not read, and ALL_OBJECTS and ALL_INDEXES list only what it may use,
+    // even with SELECT ANY TABLE. Only the owner sees the whole schema, and requiring it for an empty schema also keeps
+    // unqualified indexes in the current schema, which must then be the login user's.
     public override string? TableVisibilitySql(string schema) =>
-        $"SELECT 1 FROM DUAL WHERE {Owner(schema)} = SYS_CONTEXT('USERENV', 'SESSION_USER') " +
-        "OR EXISTS (SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE = 'SELECT ANY TABLE')";
+        $"SELECT 1 FROM DUAL WHERE {Owner(schema)} = SYS_CONTEXT('USERENV', 'SESSION_USER')";
     // Tables share their namespace with these object types; indexes have a namespace of their own.
     public override string NonTableObjectSql(string schema, string table) =>
         $"SELECT 1 FROM ALL_OBJECTS WHERE OWNER = {Owner(schema)} AND OBJECT_NAME = UPPER('{Literal(table)}') " +
