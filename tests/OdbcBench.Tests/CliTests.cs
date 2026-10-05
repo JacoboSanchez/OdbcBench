@@ -38,6 +38,9 @@ public class CliTests
     [InlineData("-n", "abc")]
     [InlineData("-b", "10,-1")]
     [InlineData("-w", "-1")]
+    [InlineData("--row-work-us", "-1")]
+    [InlineData("--row-work-us", "NaN")]
+    [InlineData("--row-work-us", "Infinity")]
     public void Bad_numbers_are_rejected(string option, string value)
     {
         Assert.Throws<CliException>(() => CliOptions.Parse(new[] { "run", option, value }));

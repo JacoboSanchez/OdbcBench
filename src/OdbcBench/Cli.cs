@@ -74,8 +74,9 @@ internal sealed class CliOptions
                     break;
                 case "--table": o.Table = Value(); break;
                 case "--row-work-us":
-                    if (!double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out double us) || us < 0)
-                        throw new CliException($"{a}: '{args[i]}' is not a number >= 0");
+                    // TryParse also accepts NaN and Infinity, which would silently disable or break the simulation.
+                    if (!double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out double us) || !double.IsFinite(us) || us < 0)
+                        throw new CliException($"{a}: '{args[i]}' is not a finite number >= 0");
                     o.RowProcessingMicros = us;
                     break;
                 case "-d": case "--dsn": o.Dsns.AddRange(Split(Value())); break;

@@ -304,7 +304,7 @@ public sealed partial class BenchConfig
         if (Iterations < 1) errors.Add("iterations must be at least 1");
         if (WarmupIterations < 0) errors.Add("warmupIterations cannot be negative");
         if (ConnectSamples < 0) errors.Add("connectSamples cannot be negative");
-        if (RowProcessingMicros < 0) errors.Add("rowProcessingMicros cannot be negative");
+        if (!double.IsFinite(RowProcessingMicros) || RowProcessingMicros < 0) errors.Add("rowProcessingMicros must be a finite number >= 0");
         if (BlockSizes.Count == 0) errors.Add("blockSizes needs at least one value");
         foreach (var b in BlockSizes) if (b < 1) errors.Add($"blockSizes: {b} is not a valid row array size");
         if (BlockSizes.Distinct().Count() != BlockSizes.Count) errors.Add("blockSizes contains duplicates");
