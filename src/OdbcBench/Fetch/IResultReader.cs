@@ -28,6 +28,8 @@ public sealed class IterationSample
     public double FirstBatchMs { get; set; }
     /// <summary>Every SQLFetchScroll call plus reading every value.</summary>
     public double FetchMs { get; set; }
+    /// <summary>Simulated client work (rowProcessingMicros) spun inside FetchMs; 0 when disabled.</summary>
+    public double ProcessingMs { get; set; }
     /// <summary>SQLFreeStmt(SQL_CLOSE).</summary>
     public double CloseMs { get; set; }
     /// <summary>Insert benchmark: every SQLEndTran(SQL_COMMIT) call.</summary>

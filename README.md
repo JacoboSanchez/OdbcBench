@@ -32,6 +32,8 @@ On Linux and macOS the tool looks for `libodbc.so.2` (`libodbc.2.dylib` on macOS
 ## Quick start
 
 1. Copy `samples/config.sample.json` to `bench.json`. Set the query, then one entry per DSN.
+   If the target database has no benchmark data yet, start from `samples/init.sample.json` and run
+   `OdbcBench init --config bench.json`; see [Initialize benchmark data](#initialize-benchmark-data).
 2. Check that every DSN connects and that the columns are bound as you expect:
 
    ```sh
@@ -53,6 +55,7 @@ Before comparing two drivers, run an **A/A test**: list the same DSN twice under
 ```text
 OdbcBench run    --config FILE [options]
 OdbcBench insert --config FILE [options]
+OdbcBench init   --config FILE [options]
 OdbcBench probe  --config FILE [--dsn NAME]
 OdbcBench report --json FILE [--output DIR]
 
@@ -60,11 +63,13 @@ OdbcBench report --json FILE [--output DIR]
   -n, --iterations N       measured iterations per series
   -w, --warmup N           warmup iterations per series
   -b, --block-size N[,N]   row array sizes to benchmark; for insert, parameter array sizes
-      --batch-size N[,N]   same as --block-size
+      --batch-size N[,N]   same as --block-size; init: population parameter-array size
   -d, --dsn NAME[,NAME]    only these DSN entries
       --query-file FILE    read the query from FILE
       --table NAME         insert: target table of every DSN
-      --rows N             insert: rows inserted per iteration
+      --rows N             insert: rows inserted per iteration; init: table sizes (N[,N])
+      --recreate           init: replace generated tables that already exist
+      --row-work-us X      run: simulated client work per fetched row, in microseconds
   -o, --output DIR         output directory
       --strict             stop before benchmarking when validation fails
       --no-validate        skip validation and the dry run
@@ -78,7 +83,7 @@ Press Ctrl+C once to stop after the current iteration and write partial results.
 | Exit code | Meaning |
 |---|---|
 | 0 | Completed; everything connected, validated and ran. |
-| 1 | Completed with problems: a DSN or series failed, row counts differ, validation failed, or the run was interrupted. |
+| 1 | Completed with problems: a DSN or series failed, row counts differ, validation failed, initialization failed, or the run was interrupted. |
 | 2 | Validation failed in strict mode; nothing was benchmarked. |
 | 3 | Usage or configuration error, or no DSN could be connected. |
 
@@ -115,6 +120,7 @@ A DSN entry needs a `name` plus either `dsn` or a full `connectionString`. Crede
 | `calibrate` | `true` | Measures the harness's own value-reading cost. |
 | `processPriority` | `normal` | Or `aboveNormal` or `high`. On Linux and macOS raising the priority needs root or `CAP_SYS_NICE`; without it the run continues at normal priority with a warning. |
 | `pauseBetweenIterationsMs` | `0` | Sleep between iterations. |
+| `rowProcessingMicros` | `0` | Run only: simulated client work. After every row array the reader busy-waits this many microseconds per fetched row, as CPU-bound client code would. The time is inside fetch and total time and is reported per sample as `processingMs`, so drivers that prefetch while the client works show a smaller increase. `--row-work-us` overrides it. |
 | `odbcVersion` | `3.80` | Or `3.0` for a driver that misbehaves under ODBC 3.8 behaviour. |
 | `validation.rows` | `10` | Rows compared. |
 | `validation.strict` | `false` | Stop before benchmarking when validation fails. |
@@ -122,6 +128,65 @@ A DSN entry needs a `name` plus either `dsn` or a full `connectionString`. Crede
 | `output` | `results`, `run` | Directory, file prefix, and which formats to write. |
 
 Passwords never reach the report, the JSON or the console. Secret-looking attributes (`PWD`, `token`, `secret` and similar) are masked, and the completed connection string returned by the driver is discarded.
+
+## Initialize benchmark data
+
+`OdbcBench init` creates a repeatable dataset through ODBC, so setup exercises the target driver and is not tied to
+PostgreSQL client tools. It currently has DDL dialects for **PostgreSQL, SQL Server and Oracle**. It initializes one
+DSN: the first enabled entry by default, or the single entry selected with `--dsn`. This avoids loading the same shared
+database once through every driver that will later be compared.
+
+```sh
+cp samples/init.sample.json bench.json
+export BENCH_PG_PWD=...
+OdbcBench init --config bench.json
+# Deliberately replace an earlier generated dataset:
+OdbcBench init --config bench.json --recreate
+```
+
+The default size × shape matrix has 10,000-row and 1,000,000-row copies of each read shape:
+
+| Shape | Purpose | Representative columns |
+|---|---|---|
+| `narrow` | Low row-width and call overhead | bigint key, integer, double, timestamp |
+| `numeric` | Native numeric conversion | small/int/big integers, decimal, real, double, boolean |
+| `text` | Character conversion and bandwidth | 32, 128 and 512-character values |
+| `wide` | Application-like mixed rows | numeric, boolean, date/time, three text widths and binary |
+
+Every read table gets a unique index on `id`; tables with `category` also get a secondary index. Statistics are updated
+after loading where the dialect supports it. `insert_target` has the wide shape but starts empty and has no index, so it
+can be used by `OdbcBench insert`. Values are deterministic functions of the row number, just like the insert benchmark,
+and no server-specific data generator is used.
+
+Use `ORDER BY id` in read queries so driver validation and checksums see a stable order. For example:
+
+```sql
+SELECT * FROM odbcbench.read_wide_1000000 ORDER BY id
+```
+
+Typical comparisons are the same shape at different row counts (fixed ODBC overhead versus throughput), different
+shapes at the same row count (conversion and row-width cost), a full ordered scan versus an `id` range, and native
+versus `wchar` bind mode. The `category` index also permits selective range tests without changing the dataset.
+On PostgreSQL, psqlODBC describes `bytea` as a long binary column; use `longColumnMode: "bindCapped"` (as in the init
+sample) when testing row arrays on the complete wide shape, or deliberately leave the default `rowByRow` mode to test
+the driver's chunked long-value path.
+
+| `initialize` field | Default | Meaning |
+|---|---|---|
+| `schema` | `odbcbench` | Schema for generated objects. Empty uses the connection's default schema. Oracle schemas are users: name an existing user or use empty. |
+| `existing` | `fail` | Refuse to touch an existing generated table. `recreate` (or `--recreate`) drops and rebuilds it. |
+| `rowCounts` | `[10000, 1000000]` | One read table size for every selected shape. `--rows` overrides it. |
+| `shapes` | all four | Any of `narrow`, `wide`, `text`, `numeric`. |
+| `batchSize` | `1000` | ODBC parameter-array size used to load rows. `--batch-size` overrides it. |
+| `valueLength` | `512` | Maximum generated characters per text value and bytes per binary value, capped by the column declaration. |
+| `createIndexes` | `true` | Create the read-table indexes after loading. |
+| `analyze` | `true` | Update optimizer statistics (PostgreSQL and SQL Server). |
+| `createInsertTable` | `true` | Also create an empty mixed-type insert target. |
+| `insertTable` | `insert_target` | Name of that insert target inside `schema`. |
+
+Initialization is intentionally safe by default: it never drops an object without `existing: "recreate"` or
+`--recreate`, and it only manages its known table names. DDL is committed table by table because Oracle implicitly
+commits DDL; if setup is interrupted, rerun with `--recreate` to rebuild the complete matrix.
 
 ## What exactly is measured
 
@@ -260,6 +325,7 @@ Numeric, integer, float, bit, date, timestamp and GUID columns bind as their C t
 | `src/OdbcBench/Odbc` | P/Invoke declarations and thin wrappers for the environment, connection and statement handles, type mapping, Driver Manager loading, and DSN hints (registry on Windows, `odbc.ini` on unixODBC). |
 | `src/OdbcBench/Fetch` | The block-fetch reader, binding plan, column buffers, and chunked `SQLGetData`. |
 | `src/OdbcBench/Insert` | The batch insert writer, target table description, parameter mapping, and value generator. |
+| `src/OdbcBench/Initialize` | Portable dataset catalog, PostgreSQL/SQL Server/Oracle DDL dialects, and initializer. |
 | `src/OdbcBench/Validation` | Sample reader, value normalisation and comparison. |
 | `src/OdbcBench/Bench` | Runner, statistics, analysis and system information. |
 | `src/OdbcBench/Report` | Result model, JSON writer and Markdown writer. |

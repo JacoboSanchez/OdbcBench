@@ -97,6 +97,27 @@ public sealed class InsertConfig
     public int ValueLength { get; set; } = 32;
 }
 
+/// <summary>Creates and populates the portable dataset used by read and insert benchmarks.</summary>
+public sealed class InitializeConfig
+{
+    /// <summary>Schema that owns the generated objects. Empty means the connection's default schema.</summary>
+    public string Schema { get; set; } = "odbcbench";
+    /// <summary>What to do when a generated table already exists: fail or recreate.</summary>
+    public string Existing { get; set; } = "fail";
+    /// <summary>Rows in each copy of every selected read shape.</summary>
+    public List<long> RowCounts { get; set; } = new() { 10_000, 1_000_000 };
+    /// <summary>Built-in read shapes to create: narrow, wide, text and numeric.</summary>
+    public List<string> Shapes { get; set; } = new() { "narrow", "wide", "text", "numeric" };
+    /// <summary>ODBC parameter-array size used while populating read tables.</summary>
+    public int BatchSize { get; set; } = 1000;
+    /// <summary>Maximum generated character count for text columns (also caps binary bytes).</summary>
+    public int ValueLength { get; set; } = 512;
+    public bool CreateIndexes { get; set; } = true;
+    public bool Analyze { get; set; } = true;
+    public bool CreateInsertTable { get; set; } = true;
+    public string InsertTable { get; set; } = "insert_target";
+}
+
 public sealed class OutputConfig
 {
     public string Directory { get; set; } = "results";
@@ -124,6 +145,8 @@ public sealed partial class BenchConfig
     public bool Interleave { get; set; } = true;
     public int PauseBetweenIterationsMs { get; set; } = 0;
     public bool CacheBuster { get; set; } = false;
+    /// <summary>Select only: simulated client work per fetched row, spun after every row array (inside FetchMs and TotalMs).</summary>
+    public double RowProcessingMicros { get; set; } = 0;
     public bool Calibrate { get; set; } = true;
     public string ProcessPriority { get; set; } = "normal";
     public int QueryTimeoutSeconds { get; set; } = 0;
@@ -136,6 +159,8 @@ public sealed partial class BenchConfig
     public int GetDataChunkBytes { get; set; } = 32768;
     /// <summary>Only needed by the insert benchmark.</summary>
     public InsertConfig? Insert { get; set; }
+    /// <summary>Dataset created by the init command.</summary>
+    public InitializeConfig? Initialize { get; set; }
     public ValidationConfig Validation { get; set; } = new();
     public OutputConfig Output { get; set; } = new();
 
@@ -278,6 +303,7 @@ public sealed partial class BenchConfig
         if (Iterations < 1) errors.Add("iterations must be at least 1");
         if (WarmupIterations < 0) errors.Add("warmupIterations cannot be negative");
         if (ConnectSamples < 0) errors.Add("connectSamples cannot be negative");
+        if (RowProcessingMicros < 0) errors.Add("rowProcessingMicros cannot be negative");
         if (BlockSizes.Count == 0) errors.Add("blockSizes needs at least one value");
         foreach (var b in BlockSizes) if (b < 1) errors.Add($"blockSizes: {b} is not a valid row array size");
         if (BlockSizes.Distinct().Count() != BlockSizes.Count) errors.Add("blockSizes contains duplicates");
@@ -294,6 +320,54 @@ public sealed partial class BenchConfig
         if (!string.IsNullOrWhiteSpace(Baseline) && !enabled.Any(d => string.Equals(d.Name, Baseline, StringComparison.OrdinalIgnoreCase)))
             errors.Add($"baseline '{Baseline}' does not match an enabled DSN name");
         return errors;
+    }
+
+    /// <summary>Returns every problem that prevents the init command from running.</summary>
+    public List<string> ValidateInitialization()
+    {
+        var errors = new List<string>();
+        var enabled = EnabledDsns.ToList();
+        if (enabled.Count == 0) errors.Add("at least one enabled DSN is required");
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in Dsns)
+        {
+            if (string.IsNullOrWhiteSpace(d.Name)) errors.Add("every DSN entry needs a name");
+            else if (!names.Add(d.Name)) errors.Add($"DSN name '{d.Name}' is used more than once");
+            if (string.IsNullOrWhiteSpace(d.Dsn) && string.IsNullOrWhiteSpace(d.ConnectionString))
+                errors.Add($"DSN '{d.Name}': either dsn or connectionString is required");
+        }
+
+        var init = Initialize ?? new InitializeConfig();
+        if (!IsSimpleIdentifier(init.Schema, allowEmpty: true))
+            errors.Add("initialize.schema must be empty or a simple SQL identifier (letters, digits and underscore; not starting with a digit)");
+        if (!IsSimpleIdentifier(init.InsertTable, allowEmpty: false))
+            errors.Add("initialize.insertTable must be a simple SQL identifier");
+        if (init.Existing.Trim().ToLowerInvariant() is not ("fail" or "recreate"))
+            errors.Add("initialize.existing must be 'fail' or 'recreate'");
+        if (init.RowCounts.Count == 0) errors.Add("initialize.rowCounts needs at least one value");
+        if (init.RowCounts.Any(n => n < 1)) errors.Add("initialize.rowCounts values must be at least 1");
+        if (init.RowCounts.Distinct().Count() != init.RowCounts.Count) errors.Add("initialize.rowCounts contains duplicates");
+        if (init.Shapes.Count == 0) errors.Add("initialize.shapes needs at least one shape");
+        var validShapes = new HashSet<string>(new[] { "narrow", "wide", "text", "numeric" }, StringComparer.OrdinalIgnoreCase);
+        foreach (string shape in init.Shapes)
+            if (!validShapes.Contains(shape.Trim())) errors.Add($"initialize.shapes: unknown shape '{shape}'");
+        if (init.Shapes.Select(s => s.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() != init.Shapes.Count)
+            errors.Add("initialize.shapes contains duplicates");
+        if (init.BatchSize < 1) errors.Add("initialize.batchSize must be at least 1");
+        if (init.ValueLength is < 1 or > 4000) errors.Add("initialize.valueLength must be between 1 and 4000");
+        if (LoginTimeoutSeconds < 0) errors.Add("loginTimeoutSeconds cannot be negative");
+        if (QueryTimeoutSeconds < 0) errors.Add("queryTimeoutSeconds cannot be negative");
+        if (MaxBoundBytes < 65536) errors.Add("maxBoundBytes is too small");
+        if (OdbcVersion.Trim() is not ("3.80" or "3.8" or "3.0" or "3")) errors.Add($"odbcVersion must be '3.80' or '3.0', not '{OdbcVersion}'");
+        return errors;
+    }
+
+    private static bool IsSimpleIdentifier(string value, bool allowEmpty)
+    {
+        value = value.Trim();
+        if (value.Length == 0) return allowEmpty;
+        if (!(char.IsLetter(value[0]) || value[0] == '_')) return false;
+        return value.All(c => char.IsLetterOrDigit(c) || c == '_');
     }
 
     /// <summary>Fills ResolvedPassword for every enabled DSN: pwd, then pwdEnv, then the prompt callback.</summary>
@@ -363,6 +437,7 @@ public sealed partial class BenchConfig
         QueryTimeoutSeconds = QueryTimeoutSeconds,
         GetDataChunkBytes = GetDataChunkBytes,
         CacheBuster = CacheBuster,
+        RowProcessingMicros = RowProcessingMicros,
     };
 
     public InsertOptions InsertOptions(int batchSize) => new()

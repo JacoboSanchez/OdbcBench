@@ -1,0 +1,34 @@
+{
+  "dsns": [
+    {
+      "name": "postgres-psqlodbc",
+      "connectionString": "Driver={PostgreSQL Unicode};Server=192.168.6.189;Port=5432;Database=bench;SSLmode=disable",
+      "uid": "bench",
+      "pwdEnv": "BENCH_PG_PWD"
+    }
+  ],
+  "initialize": {
+    "schema": "odbcbench",
+    "existing": "fail",
+    "rowCounts": [ 10000, 1000000 ],
+    "shapes": [ "narrow", "wide", "text", "numeric" ],
+    "batchSize": 1000,
+    "valueLength": 512,
+    "createIndexes": true,
+    "analyze": true,
+    "createInsertTable": true,
+    "insertTable": "insert_target"
+  },
+  "query": "SELECT * FROM odbcbench.read_wide_1000000 ORDER BY id",
+  "insert": {
+    "table": "odbcbench.insert_target",
+    "rows": 100000,
+    "cleanup": "truncate",
+    "transaction": "perIteration",
+    "verify": true,
+    "valueLength": 512
+  },
+  "blockSizes": [ 1, 100, 1000 ],
+  "longColumnMode": "bindCapped",
+  "longColumnCapBytes": 1024
+}

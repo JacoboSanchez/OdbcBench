@@ -5,6 +5,7 @@ using OdbcBench.Bench;
 using OdbcBench.Config;
 using OdbcBench.Fetch;
 using OdbcBench.Insert;
+using OdbcBench.Initialize;
 using OdbcBench.Odbc;
 using OdbcBench.Report;
 
@@ -61,6 +62,7 @@ internal static class Program
                 "probe" => Probe(cli),
                 "report" => Report(cli),
                 "insert" => Run(cli, Workload.Insert),
+                "init" => Initialize(cli),
                 _ => Run(cli, Workload.Select),
             };
         }
@@ -175,6 +177,52 @@ internal static class Program
         foreach (var d in run.Dsns.Where(d => d.Status != "connected"))
             o.WriteLine($"  {d.Name}: {d.Status}{(d.ErrorSqlState != null ? $" [{d.ErrorSqlState}]" : "")}");
         foreach (var path in written) o.WriteLine($"Written    : {path}");
+    }
+
+    // ---------------------------------------------------------------- init
+
+    private static int Initialize(CliOptions cli)
+    {
+        if (cli.ConfigPath == null) throw new CliException("--config FILE is required");
+        var config = BenchConfig.Load(cli.ConfigPath);
+        cli.ApplyTo(config);
+        config.Initialize ??= new InitializeConfig();
+        var errors = config.ValidateInitialization();
+        if (errors.Count > 0)
+            throw new ConfigException("invalid configuration:" + Environment.NewLine + string.Join(Environment.NewLine, errors.Select(e => "  - " + e)));
+        if (cli.Dsns.Count > 1)
+            throw new CliException("init accepts exactly one --dsn name: initialize a shared database once, not once through every driver");
+
+        // Without --dsn, init deliberately uses just the first enabled entry. Other entries commonly point to the
+        // same database through the drivers that will later be compared.
+        var dsn = config.EnabledDsns.First();
+        foreach (var other in config.Dsns) other.Enabled = ReferenceEquals(other, dsn);
+        config.ResolvePasswords(PromptPassword);
+        using var environment = new OdbcEnvironment(config.OdbcVersionValue);
+        try
+        {
+            using var connection = OdbcConnection.Open(environment, dsn.BuildConnectionString(), config.LoginTimeoutSeconds);
+            var initializer = new DatabaseInitializer(config, connection, Console.Out, cli.Quiet);
+            if (!cli.Quiet)
+            {
+                Console.WriteLine($"Initializing : {dsn.Name} ({dsn.Source})");
+                Console.WriteLine($"DBMS         : {connection.Driver!.DbmsName} {connection.Driver.DbmsVersion}; DDL dialect {initializer.DialectName}");
+            }
+            var tables = initializer.Run();
+            var reads = tables.Where(t => !t.IsInsertTarget).ToList();
+            var insert = tables.SingleOrDefault(t => t.IsInsertTarget);
+            Console.WriteLine();
+            Console.WriteLine($"Initialized  : {reads.Count} read tables, {reads.Sum(t => t.Rows):N0} rows" + (insert == null ? "" : ", 1 empty insert target"));
+            if (insert != null)
+                Console.WriteLine($"Insert table : {(config.Initialize?.Schema?.Trim() is { Length: > 0 } s ? s + "." : "")}{insert.Name}");
+            Console.WriteLine("Use ORDER BY id for deterministic read validation; select one generated read_<shape>_<rows> table in query.");
+            return 0;
+        }
+        catch (Exception ex) when (ex is OdbcException or InvalidOperationException or NotSupportedException)
+        {
+            Console.Error.WriteLine($"error: initialization failed: {ex.Message}");
+            return 1;
+        }
     }
 
     // ---------------------------------------------------------------- probe
