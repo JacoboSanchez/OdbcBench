@@ -70,6 +70,8 @@ public static class MarkdownReportWriter
             new[] { "Total time", "SQLExecDirectW + describe/bind (only when the statement is built) + every SQLFetchScroll and value read + SQLFreeStmt(SQL_CLOSE)" },
             new[] { "Baseline", run.BaselineDsn.Length == 0 ? "–" : Esc(run.BaselineDsn) },
         };
+        if (cfg.RowProcessingMicros > 0)
+            rows.Insert(rows.Count - 1, new[] { "Client work", $"{cfg.RowProcessingMicros.ToString("0.###", Inv)} µs per row spun after every row array (inside fetch and total time)" });
         md.Table(new[] { "Item", "Value" }, rows, "ll");
     }
 

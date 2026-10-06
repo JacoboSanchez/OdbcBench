@@ -19,6 +19,8 @@ public sealed class BlockFetchOptions
     public int GetDataChunkBytes { get; init; } = 32768;
     /// <summary>Append a unique comment per iteration to defeat result caches (also defeats plan-cache reuse).</summary>
     public bool CacheBuster { get; init; }
+    /// <summary>Simulated client work: after every row array, spin for this many microseconds per fetched row.</summary>
+    public double RowProcessingMicros { get; init; }
 }
 
 /// <summary>
@@ -141,6 +143,8 @@ public sealed unsafe class BlockFetchReader : IResultReader
             bool captureInfo = rowLimit.HasValue || (warmup && index <= 1);
             int infoDrains = 0;
             bool first = true;
+            double processingTicksPerRow = _options.RowProcessingMicros * Stopwatch.Frequency / 1_000_000.0;
+            long processingTicks = 0;
 
             long allocated0 = GC.GetAllocatedBytesForCurrentThread();
             long tFetch0 = Stopwatch.GetTimestamp();
@@ -188,6 +192,15 @@ public sealed unsafe class BlockFetchReader : IResultReader
                 TouchBound(slots, fetched, ref counters);
                 if (hasUnbound) ReadUnbound(statement, getData!, slots, ref counters); // row array size is 1 here
 
+                if (processingTicksPerRow > 0)
+                {
+                    // Busy-wait like CPU-bound client code; Thread.Sleep oversleeps by more than a 1,000-row array's worth.
+                    long tWork0 = Stopwatch.GetTimestamp();
+                    long until = tWork0 + (long)(processingTicksPerRow * fetched);
+                    while (Stopwatch.GetTimestamp() < until) Thread.SpinWait(20);
+                    processingTicks += Stopwatch.GetTimestamp() - tWork0;
+                }
+
                 rows += fetched;
                 if (fetched > _maxBatchRows) _maxBatchRows = fetched;
                 if (rowLimit.HasValue && rows >= rowLimit.Value) break;
@@ -195,6 +208,7 @@ public sealed unsafe class BlockFetchReader : IResultReader
             long tFetch1 = Stopwatch.GetTimestamp();
             sample.AllocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocated0;
             sample.FetchMs = Ms(tFetch0, tFetch1);
+            sample.ProcessingMs = processingTicks * 1000.0 / Stopwatch.Frequency;
 
             statement.CloseCursor();
             sample.CloseMs = Ms(tFetch1, Stopwatch.GetTimestamp());

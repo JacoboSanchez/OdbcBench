@@ -49,6 +49,18 @@ public class ConfigTests
         Assert.Contains(errors, e => e.Contains("baseline 'zzz'"));
     }
 
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void Row_work_must_be_finite_and_not_negative(double micros)
+    {
+        var c = BenchConfig.Parse(Minimal);
+        c.ResolveQuery(null);
+        c.RowProcessingMicros = micros;
+        Assert.Contains(c.Validate(), e => e.Contains("rowProcessingMicros must be a finite number >= 0"));
+    }
+
     [Fact]
     public void Per_dsn_query_overrides_the_global_one()
     {

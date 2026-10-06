@@ -19,12 +19,16 @@ internal sealed class CliOptions
     public int? Warmup { get; private set; }
     public List<int>? BlockSizes { get; private set; }
     public long? Rows { get; private set; }
+    public double? RowProcessingMicros { get; private set; }
+    public List<long>? InitRowCounts { get; private set; }
+    public int? InitBatchSize { get; private set; }
     public string? Table { get; private set; }
     public List<string> Dsns { get; } = new();
     public string? Output { get; private set; }
     public bool Strict { get; private set; }
     public bool NoValidate { get; private set; }
     public bool Quiet { get; private set; }
+    public bool Recreate { get; private set; }
     public bool Help { get; private set; }
     public bool Version { get; private set; }
 
@@ -41,8 +45,8 @@ internal sealed class CliOptions
                 o.Help = true;
                 return o;
             }
-            if (o.Command is not ("run" or "insert" or "probe" or "report"))
-                throw new CliException($"unknown command '{args[0]}' (expected run, insert, probe or report)");
+            if (o.Command is not ("run" or "insert" or "init" or "probe" or "report"))
+                throw new CliException($"unknown command '{args[0]}' (expected run, insert, init, probe or report)");
         }
 
         for (; i < args.Length; i++)
@@ -56,16 +60,31 @@ internal sealed class CliOptions
                 case "--query-file": o.QueryFile = Value(); break;
                 case "-n": case "--iterations": o.Iterations = Int(a, Value(), 1); break;
                 case "-w": case "--warmup": o.Warmup = Int(a, Value(), 0); break;
-                case "-b": case "--block-size": case "--block-sizes": case "--batch-size": case "--batch-sizes":
-                    o.BlockSizes = Split(Value()).Select(v => Int(a, v, 1)).ToList();
+                case "-b":
+                case "--block-size":
+                case "--block-sizes":
+                case "--batch-size":
+                case "--batch-sizes":
+                    if (o.Command == "init") o.InitBatchSize = Int(a, Value(), 1);
+                    else o.BlockSizes = Split(Value()).Select(v => Int(a, v, 1)).ToList();
                     break;
-                case "--rows": o.Rows = Long(a, Value(), 1); break;
+                case "--rows":
+                    if (o.Command == "init") o.InitRowCounts = Split(Value()).Select(v => Long(a, v, 1)).ToList();
+                    else o.Rows = Long(a, Value(), 1);
+                    break;
                 case "--table": o.Table = Value(); break;
+                case "--row-work-us":
+                    // TryParse also accepts NaN and Infinity, which would silently disable or break the simulation.
+                    if (!double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out double us) || !double.IsFinite(us) || us < 0)
+                        throw new CliException($"{a}: '{args[i]}' is not a finite number >= 0");
+                    o.RowProcessingMicros = us;
+                    break;
                 case "-d": case "--dsn": o.Dsns.AddRange(Split(Value())); break;
                 case "-o": case "--output": o.Output = Value(); break;
                 case "--strict": o.Strict = true; break;
                 case "--no-validate": o.NoValidate = true; break;
                 case "--quiet": o.Quiet = true; break;
+                case "--recreate": o.Recreate = true; break;
                 case "-h": case "--help": case "/?": o.Help = true; break;
                 case "--version": o.Version = true; break;
                 default: throw new CliException($"unknown option '{a}'");
@@ -80,7 +99,11 @@ internal sealed class CliOptions
         if (Iterations is int n) config.Iterations = n;
         if (Warmup is int w) config.WarmupIterations = w;
         if (BlockSizes != null) config.BlockSizes = BlockSizes.Distinct().ToList();
+        if (RowProcessingMicros is double us) config.RowProcessingMicros = us;
         if (Rows is long rows) (config.Insert ??= new InsertConfig()).Rows = rows;
+        if (InitRowCounts != null) (config.Initialize ??= new InitializeConfig()).RowCounts = InitRowCounts.Distinct().ToList();
+        if (InitBatchSize is int initBatch) (config.Initialize ??= new InitializeConfig()).BatchSize = initBatch;
+        if (Recreate) (config.Initialize ??= new InitializeConfig()).Existing = "recreate";
         if (Table != null)
         {
             (config.Insert ??= new InsertConfig()).Table = Table;
@@ -131,10 +154,11 @@ internal sealed class CliOptions
         Usage:
           OdbcBench run    --config FILE [options]   validate the first rows on every DSN, benchmark the query, write the report
           OdbcBench insert --config FILE [options]   benchmark batch inserts of generated rows into a table (parameter arrays)
+          OdbcBench init   --config FILE [options]   create and populate a portable benchmark dataset on one DSN
           OdbcBench probe  --config FILE [--dsn N]   connect, show driver identity, column types and chosen bindings
           OdbcBench report --json FILE [--output DIR]  re-render the Markdown report from a saved JSON result
 
-        Options for run and insert (override the configuration file):
+        Options (override the configuration file):
           -c, --config FILE        configuration file (JSON)
           -n, --iterations N       measured iterations per series
           -w, --warmup N           warmup iterations per series (not in the statistics)
@@ -144,6 +168,10 @@ internal sealed class CliOptions
               --query-file FILE    read the query from FILE instead of the configuration
               --table NAME         insert: target table of every DSN
               --rows N             insert: rows inserted per iteration
+                                  init: comma-separated read-table row counts
+              --row-work-us X      run: simulated client work, X microseconds spun per fetched row after
+                                  every row array (counted in fetch and total time)
+              --recreate           init: drop and rebuild generated tables that already exist
           -o, --output DIR         output directory for the .md and .json files
               --strict             stop before benchmarking when validation fails
               --no-validate        skip the first-rows validation and the dry run

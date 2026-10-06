@@ -54,12 +54,20 @@ public static class ParameterMapper
     /// Chooses the value kind, the SQL_C_* type and the element width for a target column, or returns null when the
     /// generator has no value for its type. Long columns are no obstacle: the buffer is sized by the generated value.
     /// </summary>
-    public static InsertColumn? Map(ColumnInfo c, string sqlName, BindMode mode, int valueLength)
+    /// <param name="valueType">
+    /// The column's logical SQL type when the caller knows it (init does). It picks the generated values, never the
+    /// binding, and only where the description loses it: Oracle describes DATE as a timestamp and its NUMBER-based
+    /// integers and booleans as decimals.
+    /// </param>
+    public static InsertColumn? Map(ColumnInfo c, string sqlName, BindMode mode, int valueLength, short? valueType = null)
     {
         long size = c.ColumnSizeClamped;
         int variable = (int)Math.Max(1, size > 0 ? Math.Min(size, valueLength) : valueLength);
+        short type = valueType is short logical &&
+            c.SqlType is Native.SQL_DECIMAL or Native.SQL_NUMERIC or Native.SQL_TYPE_TIMESTAMP or Native.SQL_TIMESTAMP
+            ? logical : c.SqlType;
 
-        InsertColumn? column = c.SqlType switch
+        InsertColumn? column = type switch
         {
             Native.SQL_TINYINT => Integer(c, sqlName, 1L << 7),
             Native.SQL_SMALLINT => Integer(c, sqlName, 1L << 15),
