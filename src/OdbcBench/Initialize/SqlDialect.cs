@@ -65,6 +65,8 @@ public abstract class SqlDialect
     public abstract string? CannotDropTableSql(string schema, string table);
     /// <summary>Query that returns a row when the account may create tables in the schema.</summary>
     public abstract string CanCreateTablesSql(string schema);
+    /// <summary>Query that returns a row when other objects depend on the table in a way that makes DROP TABLE fail.</summary>
+    public abstract string DependentObjectsSql(string schema, string table);
     public virtual string DropTableSql(string qualifiedTable) => $"DROP TABLE {qualifiedTable}";
     public string CreateIndexSql(string schema, string indexName, string qualifiedTable, string column, bool unique) =>
         $"CREATE {(unique ? "UNIQUE " : "")}INDEX {IndexReference(schema, indexName)} ON {qualifiedTable} ({Quote(column)})";
@@ -126,6 +128,12 @@ internal sealed class PostgreSqlDialect : SqlDialect
     public override string? CannotDropTableSql(string schema, string table) => RelationSql(schema, table) +
         " AND NOT pg_catalog.pg_has_role(c.relowner, 'USAGE') AND NOT pg_catalog.pg_has_role(n.nspowner, 'USAGE')";
     public override string CanCreateTablesSql(string schema) => $"SELECT 1 WHERE pg_catalog.has_schema_privilege({SchemaName(schema)}, 'CREATE')";
+    // Normal dependencies are what DROP TABLE without CASCADE refuses: foreign keys and views on the table. Its own
+    // indexes and row type are automatic or internal dependencies.
+    public override string DependentObjectsSql(string schema, string table) =>
+        "SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_class c ON c.oid = d.refobjid " +
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+        $"WHERE d.refclassid = 'pg_catalog.pg_class'::regclass AND d.deptype = 'n' AND n.nspname = {SchemaName(schema)} AND c.relname = '{Literal(table)}'";
     // psqlODBC passes the server's undefined_table state through.
     public override bool IsMissingTable(string? sqlState, int? nativeError) => sqlState == "42P01" || base.IsMissingTable(sqlState, nativeError);
     public override string? AnalyzeSql(string schema, string table) => $"ANALYZE {Qualify(schema, table)}";
@@ -166,6 +174,13 @@ internal sealed class SqlServerDialect : SqlDialect
         $"AND HAS_PERMS_BY_NAME('{Literal(schema.Length == 0 ? Quote(table) : Qualify(schema, table))}', 'OBJECT', 'CONTROL') = 0";
     public override string CanCreateTablesSql(string schema) =>
         $"SELECT 1 WHERE HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CREATE TABLE') = 1 AND HAS_PERMS_BY_NAME({SchemaName(schema)}, 'SCHEMA', 'ALTER') = 1";
+    // Foreign keys and schema-bound views block DROP TABLE; ordinary views do not.
+    public override string DependentObjectsSql(string schema, string table)
+    {
+        string id = $"OBJECT_ID('{Literal(schema.Length == 0 ? Quote(table) : Qualify(schema, table))}')";
+        return $"SELECT 1 FROM sys.foreign_keys WHERE referenced_object_id = {id} " +
+            $"UNION ALL SELECT 1 FROM sys.sql_expression_dependencies WHERE referenced_id = {id} AND is_schema_bound_reference = 1";
+    }
     private static string SchemaName(string schema) => schema.Length == 0 ? "SCHEMA_NAME()" : $"'{Literal(schema)}'";
     // Msg 208, "Invalid object name", whatever SQLSTATE the driver maps it to.
     public override bool IsMissingTable(string? sqlState, int? nativeError) => nativeError == 208 || base.IsMissingTable(sqlState, nativeError);
@@ -224,6 +239,10 @@ internal sealed class OracleDialect : SqlDialect
         "AND (EXISTS (SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE = 'UNLIMITED TABLESPACE') " +
         "OR EXISTS (SELECT 1 FROM USER_TS_QUOTAS q JOIN USER_USERS u ON q.TABLESPACE_NAME = u.DEFAULT_TABLESPACE " +
         "WHERE q.MAX_BYTES = -1 OR q.BYTES < q.MAX_BYTES))";
+    // Foreign keys block DROP TABLE without CASCADE CONSTRAINTS; views only become invalid.
+    public override string DependentObjectsSql(string schema, string table) =>
+        "SELECT 1 FROM ALL_CONSTRAINTS r JOIN ALL_CONSTRAINTS p ON p.OWNER = r.R_OWNER AND p.CONSTRAINT_NAME = r.R_CONSTRAINT_NAME " +
+        $"WHERE r.CONSTRAINT_TYPE = 'R' AND p.OWNER = {Owner(schema)} AND p.TABLE_NAME = UPPER('{Literal(table)}')";
     private static string Owner(string schema) =>
         schema.Length == 0 ? "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" : $"UPPER('{Literal(schema)}')";
     public override string? AnalyzeSql(string schema, string table) => null;

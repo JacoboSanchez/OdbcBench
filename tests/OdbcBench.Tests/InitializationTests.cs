@@ -159,6 +159,13 @@ public class InitializationTests
         Assert.Null(oracle.CannotDropTableSql("bench", "read_narrow_10")); // only the owner gets this far
         Assert.Contains("'CREATE TABLE'", oracle.CanCreateTablesSql("bench"));
         Assert.Contains("PRIVILEGE = 'UNLIMITED TABLESPACE'", oracle.CanCreateTablesSql("bench"));
+
+        // Dependents that make DROP TABLE fail: foreign keys everywhere, views on PostgreSQL, schema-bound views on SQL Server.
+        Assert.Contains("d.deptype = 'n' AND n.nspname = 'bench' AND c.relname = 'read_narrow_10'", postgres.DependentObjectsSql("bench", "read_narrow_10"));
+        Assert.Contains("referenced_object_id = OBJECT_ID('[bench].[read_narrow_10]')", sqlServer.DependentObjectsSql("bench", "read_narrow_10"));
+        Assert.Contains("is_schema_bound_reference = 1", sqlServer.DependentObjectsSql("bench", "read_narrow_10"));
+        Assert.Contains("r.CONSTRAINT_TYPE = 'R' AND p.OWNER = UPPER('bench') AND p.TABLE_NAME = UPPER('read_narrow_10')",
+            oracle.DependentObjectsSql("bench", "read_narrow_10"));
         Assert.Contains("FROM USER_TS_QUOTAS", oracle.CanCreateTablesSql("bench"));
     }
 

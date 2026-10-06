@@ -32,8 +32,8 @@ public sealed class DatabaseInitializer
     public IReadOnlyList<InitializationTable> Run()
     {
         var tables = InitializationCatalog.Build(_options);
-        if (_schema.Length == 0) _schema = CurrentSchema();
         RequireFittingNames(_schema, tables, _dialect);
+        if (_schema.Length == 0) _schema = CurrentSchema(); // an existing schema's name fits by definition
         EnsureSchema();
         RequireTableVisibility();
         RequireNoConflictingObjects(tables);
@@ -136,18 +136,23 @@ public sealed class DatabaseInitializer
             throw new InvalidOperationException("init will not replace objects it did not create: " + string.Join("; ", conflicts));
     }
 
-    // --recreate drops every existing table before it creates any, so a table the account may not drop, or a schema it
-    // may not create in, would otherwise stop init only after part of the dataset was gone.
+    // --recreate drops every existing table before it creates any, so a table the account may not drop or that other
+    // objects depend on, or a schema it may not create in, would otherwise stop init after part of the dataset was gone.
     private void RequireDdlRights(IEnumerable<InitializationTable> existing)
     {
-        var problems = existing
-            .Where(t => _dialect.CannotDropTableSql(_schema, t.Name) is string sql && QueryHasRows(sql))
-            .Select(t => $"may not drop {t.QualifiedName(_dialect, _schema)}")
-            .ToList();
+        var problems = new List<string>();
+        foreach (var table in existing)
+        {
+            string qualified = table.QualifiedName(_dialect, _schema);
+            if (_dialect.CannotDropTableSql(_schema, table.Name) is string sql && QueryHasRows(sql))
+                problems.Add($"this account may not drop {qualified}");
+            else if (QueryHasRows(_dialect.DependentObjectsSql(_schema, table.Name)))
+                problems.Add($"{qualified} cannot be dropped while other objects (foreign keys or views) depend on it");
+        }
         if (!QueryHasRows(_dialect.CanCreateTablesSql(_schema)))
-            problems.Add($"may not create tables in schema {_dialect.Quote(_schema)}");
+            problems.Add($"this account may not create tables in schema {_dialect.Quote(_schema)}");
         if (problems.Count > 0)
-            throw new InvalidOperationException($"this account {string.Join("; ", problems)}; init stopped before changing anything");
+            throw new InvalidOperationException($"init stopped before changing anything: {string.Join("; ", problems)}");
     }
 
     private void Populate(InitializationTable table)
