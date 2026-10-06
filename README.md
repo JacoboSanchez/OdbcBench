@@ -190,8 +190,11 @@ Before it creates anything, init checks `schema` and every table name against th
 Oracle, 63 bytes on PostgreSQL and 128 characters on SQL Server.
 
 Initialization is intentionally safe by default: it never drops an object without `existing: "recreate"` or
-`--recreate`, and it only manages its known table names. DDL is committed table by table because Oracle implicitly
-commits DDL; if setup is interrupted, rerun with `--recreate` to rebuild the complete matrix.
+`--recreate`, and it only manages its known table names. Before dropping anything it checks that no other object holds
+a generated name and that the account may drop, and nothing else depends on, every existing table. On PostgreSQL and SQL
+Server it then drops and recreates the tables in one transaction, so a failure leaves the previous dataset as it was;
+Oracle commits each DDL statement and relies on those checks. Rows are loaded after that transaction, table by table;
+if loading is interrupted, rerun with `--recreate` to rebuild the complete matrix.
 
 ## What exactly is measured
 

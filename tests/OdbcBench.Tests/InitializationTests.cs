@@ -166,6 +166,13 @@ public class InitializationTests
         Assert.Contains("is_schema_bound_reference = 1", sqlServer.DependentObjectsSql("bench", "read_narrow_10"));
         Assert.Contains("r.CONSTRAINT_TYPE = 'R' AND p.OWNER = UPPER('bench') AND p.TABLE_NAME = UPPER('read_narrow_10')",
             oracle.DependentObjectsSql("bench", "read_narrow_10"));
+        Assert.Contains("FROM USER_TAB_PRIVS_MADE WHERE TABLE_NAME = UPPER('read_narrow_10') AND PRIVILEGE = 'REFERENCES'",
+            oracle.DependentObjectsSql("bench", "read_narrow_10"));
+
+        // Where DDL is transactional, init drops and creates in one transaction that a failure rolls back.
+        Assert.True(postgres.TransactionalDdl);
+        Assert.True(sqlServer.TransactionalDdl);
+        Assert.False(oracle.TransactionalDdl);
         Assert.Contains("FROM USER_TS_QUOTAS", oracle.CanCreateTablesSql("bench"));
     }
 

@@ -73,6 +73,8 @@ public abstract class SqlDialect
     // PostgreSQL and SQL Server always put an index in its table's schema and reject a schema-qualified index name.
     protected virtual string IndexReference(string schema, string indexName) => Quote(indexName);
     public abstract string? AnalyzeSql(string schema, string table);
+    /// <summary>True when DROP and CREATE TABLE take part in transactions, so a failed rebuild can be rolled back.</summary>
+    public virtual bool TransactionalDdl => true;
 
     public static SqlDialect Detect(string dbmsName)
     {
@@ -239,10 +241,14 @@ internal sealed class OracleDialect : SqlDialect
         "AND (EXISTS (SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE = 'UNLIMITED TABLESPACE') " +
         "OR EXISTS (SELECT 1 FROM USER_TS_QUOTAS q JOIN USER_USERS u ON q.TABLESPACE_NAME = u.DEFAULT_TABLESPACE " +
         "WHERE q.MAX_BYTES = -1 OR q.BYTES < q.MAX_BYTES))";
-    // Foreign keys block DROP TABLE without CASCADE CONSTRAINTS; views only become invalid.
+    public override bool TransactionalDdl => false; // every DDL statement commits
+    // Foreign keys block DROP TABLE without CASCADE CONSTRAINTS; views only become invalid. ALL_CONSTRAINTS shows the
+    // owner every foreign key from its own schema but not from tables it cannot access, so a REFERENCES grant (which a
+    // foreign key from another schema requires, and which cannot go to a role) counts as a possible one.
     public override string DependentObjectsSql(string schema, string table) =>
         "SELECT 1 FROM ALL_CONSTRAINTS r JOIN ALL_CONSTRAINTS p ON p.OWNER = r.R_OWNER AND p.CONSTRAINT_NAME = r.R_CONSTRAINT_NAME " +
-        $"WHERE r.CONSTRAINT_TYPE = 'R' AND p.OWNER = {Owner(schema)} AND p.TABLE_NAME = UPPER('{Literal(table)}')";
+        $"WHERE r.CONSTRAINT_TYPE = 'R' AND p.OWNER = {Owner(schema)} AND p.TABLE_NAME = UPPER('{Literal(table)}') " +
+        $"UNION ALL SELECT 1 FROM USER_TAB_PRIVS_MADE WHERE TABLE_NAME = UPPER('{Literal(table)}') AND PRIVILEGE = 'REFERENCES'";
     private static string Owner(string schema) =>
         schema.Length == 0 ? "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" : $"UPPER('{Literal(schema)}')";
     public override string? AnalyzeSql(string schema, string table) => null;

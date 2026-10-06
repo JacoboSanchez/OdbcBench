@@ -45,21 +45,29 @@ public sealed class DatabaseInitializer
                 "; set initialize.existing to 'recreate' or pass --recreate to replace them");
         RequireDdlRights(existing);
 
+        // The checks above cannot see everything (objects hidden from this account, concurrent changes), so where DDL is
+        // transactional every drop and create runs in one transaction: a failure rolls back to the dataset as it was.
+        // Oracle commits each DDL statement and relies on the checks alone.
+        bool atomic = _dialect.TransactionalDdl && _connection.TrySetManualCommit();
         foreach (var table in existing.AsEnumerable().Reverse())
         {
             Status($"Dropping     {table.QualifiedName(_dialect, _schema)}");
-            Execute(_dialect.DropTableSql(table.QualifiedName(_dialect, _schema)));
+            Execute(_dialect.DropTableSql(table.QualifiedName(_dialect, _schema)), commit: !atomic);
         }
-
         foreach (var table in tables)
         {
+            Status($"Creating     {table.QualifiedName(_dialect, _schema)} ({table.Shape}{(table.IsInsertTarget ? ", empty insert target" : $", {table.Rows.ToString("N0", CultureInfo.InvariantCulture)} rows")})");
+            Execute(table.CreateSql(_dialect, _schema), commit: !atomic);
+        }
+        if (atomic) _connection.Commit();
+
+        foreach (var table in tables.Where(t => !t.IsInsertTarget))
+        {
             string qualified = table.QualifiedName(_dialect, _schema);
-            Status($"Creating     {qualified} ({table.Shape}{(table.IsInsertTarget ? ", empty insert target" : $", {table.Rows.ToString("N0", CultureInfo.InvariantCulture)} rows")})");
-            Execute(table.CreateSql(_dialect, _schema));
-            if (!table.IsInsertTarget) Populate(table);
+            Populate(table);
             foreach (var (index, column, unique) in Indexes(table))
                 Execute(_dialect.CreateIndexSql(_schema, index, qualified, column, unique));
-            if (_options.Analyze && !table.IsInsertTarget && _dialect.AnalyzeSql(_schema, table.Name) is string analyze)
+            if (_options.Analyze && _dialect.AnalyzeSql(_schema, table.Name) is string analyze)
                 Execute(analyze);
         }
         return tables;
@@ -147,7 +155,7 @@ public sealed class DatabaseInitializer
             if (_dialect.CannotDropTableSql(_schema, table.Name) is string sql && QueryHasRows(sql))
                 problems.Add($"this account may not drop {qualified}");
             else if (QueryHasRows(_dialect.DependentObjectsSql(_schema, table.Name)))
-                problems.Add($"{qualified} cannot be dropped while other objects (foreign keys or views) depend on it");
+                problems.Add($"{qualified} cannot be dropped while other objects depend on it (a foreign key, a view, or on Oracle a REFERENCES grant that allows one)");
         }
         if (!QueryHasRows(_dialect.CanCreateTablesSql(_schema)))
             problems.Add($"this account may not create tables in schema {_dialect.Quote(_schema)}");
@@ -225,13 +233,13 @@ public sealed class DatabaseInitializer
         }
     }
 
-    private void Execute(string sql)
+    private void Execute(string sql, bool commit = true)
     {
         using var statement = new OdbcStatement(_connection);
         try
         {
             statement.ExecDirect(sql);
-            if (!_connection.AutoCommit) _connection.Commit();
+            if (commit && !_connection.AutoCommit) _connection.Commit();
         }
         catch
         {
