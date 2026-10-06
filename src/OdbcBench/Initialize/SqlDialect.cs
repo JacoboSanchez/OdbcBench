@@ -115,7 +115,10 @@ internal sealed class PostgreSqlDialect : SqlDialect
         "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
         $"WHERE n.nspname = {SchemaName(schema)} AND c.relname = '{Literal(name)}'";
     private static string SchemaName(string schema) => schema.Length == 0 ? "current_schema()" : $"'{Literal(schema)}'";
-    public override string NonTableObjectSql(string schema, string table) => RelationSql(schema, table) + " AND c.relkind NOT IN ('r', 'p')";
+    // A table also needs its name free among data types: domains, enums and other types without a relation of their own.
+    public override string NonTableObjectSql(string schema, string table) => RelationSql(schema, table) + " AND c.relkind NOT IN ('r', 'p') " +
+        "UNION ALL SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace " +
+        $"WHERE n.nspname = {SchemaName(schema)} AND t.typname = '{Literal(table)}' AND t.typrelid = 0";
     public override string? ConflictingIndexSql(string schema, string index, string table) =>
         RelationSql(schema, index) + " AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid = i.indrelid " +
         $"WHERE i.indexrelid = c.oid AND t.relname = '{Literal(table)}')";
@@ -215,8 +218,12 @@ internal sealed class OracleDialect : SqlDialect
         $"SELECT 1 FROM ALL_INDEXES WHERE OWNER = {Owner(schema)} AND INDEX_NAME = UPPER('{Literal(index)}') " +
         $"AND NOT (TABLE_OWNER = {Owner(schema)} AND TABLE_NAME = UPPER('{Literal(table)}'))";
     public override string? CannotDropTableSql(string schema, string table) => null; // init only runs as the schema's owner
+    // CREATE TABLE also needs room in the owner's default tablespace: UNLIMITED TABLESPACE or a quota not yet used up.
     public override string CanCreateTablesSql(string schema) =>
-        "SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE IN ('CREATE TABLE', 'CREATE ANY TABLE')";
+        "SELECT 1 FROM DUAL WHERE EXISTS (SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE IN ('CREATE TABLE', 'CREATE ANY TABLE')) " +
+        "AND (EXISTS (SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE = 'UNLIMITED TABLESPACE') " +
+        "OR EXISTS (SELECT 1 FROM USER_TS_QUOTAS q JOIN USER_USERS u ON q.TABLESPACE_NAME = u.DEFAULT_TABLESPACE " +
+        "WHERE q.MAX_BYTES = -1 OR q.BYTES < q.MAX_BYTES))";
     private static string Owner(string schema) =>
         schema.Length == 0 ? "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" : $"UPPER('{Literal(schema)}')";
     public override string? AnalyzeSql(string schema, string table) => null;

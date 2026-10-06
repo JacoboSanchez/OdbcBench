@@ -115,8 +115,10 @@ public class InitializationTests
     public void Name_conflicts_are_looked_up_in_each_dbms_catalog()
     {
         var postgres = SqlDialect.Detect("PostgreSQL");
-        Assert.EndsWith("n.nspname = 'bench' AND c.relname = 'read_narrow_10' AND c.relkind NOT IN ('r', 'p')",
+        Assert.Contains("n.nspname = 'bench' AND c.relname = 'read_narrow_10' AND c.relkind NOT IN ('r', 'p')",
             postgres.NonTableObjectSql("bench", "read_narrow_10"));
+        // Domains and enums take a table's name too, without a pg_class row.
+        Assert.EndsWith("t.typname = 'read_narrow_10' AND t.typrelid = 0", postgres.NonTableObjectSql("bench", "read_narrow_10"));
         Assert.Contains("n.nspname = current_schema()", postgres.NonTableObjectSql("", "read_narrow_10"));
         Assert.Contains("t.relname = 'read_narrow_10'", postgres.ConflictingIndexSql("bench", "ix_read_narrow_10_id", "read_narrow_10"));
 
@@ -156,6 +158,8 @@ public class InitializationTests
         var oracle = SqlDialect.Detect("Oracle");
         Assert.Null(oracle.CannotDropTableSql("bench", "read_narrow_10")); // only the owner gets this far
         Assert.Contains("'CREATE TABLE'", oracle.CanCreateTablesSql("bench"));
+        Assert.Contains("PRIVILEGE = 'UNLIMITED TABLESPACE'", oracle.CanCreateTablesSql("bench"));
+        Assert.Contains("FROM USER_TS_QUOTAS", oracle.CanCreateTablesSql("bench"));
     }
 
     [Fact]
